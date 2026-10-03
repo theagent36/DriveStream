@@ -7,7 +7,6 @@ DriveStream is a modern Android application built with Jetpack Compose featuring
 - **Audio Playback Engine**: Powered by AndroidX Media3 (ExoPlayer) with background playback service and lock screen media controls.
 - **Modern Jetpack Compose UI**: Dynamic Material 3 theming, AMOLED dark modes, and anchored fluid bottom sheet player.
 - **Rich Metadata & Art**: Automatic high-resolution album art resolution using Spotify Web API and iTunes Search API fallback.
-- **Jam Sessions**: Real-time collaborative synchronized listening rooms powered by Firebase Realtime Database.
 - **Built-in Equalizer & Audio FX**: Custom presets, 5-band EQ, bass boost, and loudness enhancement.
 
 ## Tech Stack & Architecture
