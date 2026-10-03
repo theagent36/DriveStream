@@ -1,0 +1,8 @@
+## Local configuration template for DriveStream
+# Copy this file to local.properties and fill in your values
+sdk.dir=/path/to/Android/Sdk
+
+GOOGLE_CLIENT_ID="your_google_client_id_here"
+SPOTIFY_CLIENT_ID="your_spotify_client_id_here"
+SPOTIFY_CLIENT_SECRET="your_spotify_client_secret_here"
+FIREBASE_DATABASE_URL="https://your-project-default-rtdb.firebaseio.com"

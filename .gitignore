@@ -1,0 +1,59 @@
+# Built application files & releases
+*.apk
+*.aar
+*.ap_
+*.aab
+app/release/
+
+# Files for the ART/Dalvik VM
+*.dex
+
+# Java class files
+*.class
+
+# Generated build directories
+bin/
+gen/
+out/
+build/
+**/build/
+app/build/
+
+# Gradle files & caches
+.gradle/
+buildOutputCleanup/
+
+# Local configuration & credentials (CRITICAL)
+local.properties
+keystore.properties
+keystore/
+*.jks
+*.keystore
+
+# Google Services / Firebase credentials (CRITICAL)
+google-services.json
+**/google-services.json
+
+# Android Studio & IDE files
+.idea/
+.idea/*
+*.iml
+.vscode/
+.kotlin/
+
+# OS specific files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Log and diagnostic files
+*.log
+*_log.txt
+build_output.txt
+custom_log.txt
+TestGson.kt
+
+# Profiling and memory dumps
+captures/
+.cxx/
+*.hprof

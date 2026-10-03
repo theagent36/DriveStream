@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Splash screen icon: circular badge with the app's wavy gradient artwork -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Outer dark circle bg -->
+    <item>
+        <shape android:shape="oval">
+            <solid android:color="#1A1A2E" />
+        </shape>
+    </item>
+    <!-- Inner artwork image -->
+    <item
+        android:bottom="12dp"
+        android:left="12dp"
+        android:right="12dp"
+        android:top="12dp">
+        <bitmap
+            android:gravity="center"
+            android:src="@drawable/default_art" />
+    </item>
+</layer-list>
