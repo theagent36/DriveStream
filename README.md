@@ -9,6 +9,14 @@ DriveStream is a modern Android application built with Jetpack Compose featuring
 - **Rich Metadata & Art**: Automatic high-resolution album art resolution using Spotify Web API and iTunes Search API fallback.
 - **Built-in Equalizer & Audio FX**: Custom presets, 5-band EQ, bass boost, and loudness enhancement.
 
+## Coming Soon 🚀
+
+### Native Spotify Sync
+- **Native Spotify Playlist Sync**: Paste any public Spotify playlist link into DriveStream to trigger automated library synchronization.
+- **Smart Cloud Diffing**: Cross-references the Spotify tracklist with your existing Google Drive music library to instantly pinpoint missing tracks.
+- **Direct-to-Cloud Downloading**: Automatically resolves tracks via open audio backends and streams them directly into your Google Drive storage pipeline, completely bypassing local device storage.
+- **Automatic Tagging**: Seamlessly tags downloaded audio streams with official Spotify metadata and high-resolution album artwork.
+
 ## Tech Stack & Architecture
 - **Language**: Kotlin
 - **UI Toolkit**: Jetpack Compose, Material 3
