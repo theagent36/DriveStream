@@ -19,6 +19,9 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.filled.FavoriteBorder
@@ -346,29 +349,37 @@ class MainActivity : ComponentActivity() {
                         val sleepTimerTotal by viewModel.sleepTimerTotal.collectAsState()
                         val sleepTimerPauseAfterTrack by viewModel.sleepTimerPauseAfterTrack.collectAsState()
                         val currentPlayingFolderName by viewModel.currentPlayingFolderName.collectAsState()
+                        val queueListState = androidx.compose.foundation.lazy.rememberLazyListState()
 
-                        PlaybackBottomSheet(
-                            controller = controller,
-                            upcomingQueue = upcomingQueue,
-                            currentSpotifyArtUrl = currentSpotifyArtUrl,
-                            songThumbnails = songThumbnails,
-                            sleepTimerRemaining = sleepTimerRemaining,
-                            sleepTimerTotal = sleepTimerTotal,
-                            sleepTimerPauseAfterTrack = sleepTimerPauseAfterTrack,
-                            currentPlayingFolderName = currentPlayingFolderName,
-                            isCurrentTrackFavourite = favourites.any { it.fileId == currentPlayingFileId },
-                            onToggleCurrentFavourite = {
-                                viewModel.toggleCurrentFavourite()
-                            },
-                            sessionRole = sessionRole,
-                            onNeedsTokenRefresh = { viewModel.refreshAuthTokenAndRetry() },
-                            onClearQueue = { viewModel.clearQueue() },
-                            onPlayQueueItem = { file -> viewModel.playAudio(file) },
-                            onCollapse = { isPlayerExpanded = false },
-                            onSetSleepTimer = { mins -> viewModel.setSleepTimer(mins) },
-                            onCancelSleepTimer = { viewModel.cancelSleepTimer() },
-                            onSetSleepTimerBehavior = { b -> viewModel.setSleepTimerBehavior(b) }
-                        )
+                        Box(
+                            modifier = Modifier.fillMaxSize()
+                        ) {
+                            PlaybackBottomSheet(
+                                controller = controller,
+                                upcomingQueue = upcomingQueue,
+                                currentSpotifyArtUrl = currentSpotifyArtUrl,
+                                songThumbnails = songThumbnails,
+                                sleepTimerRemaining = sleepTimerRemaining,
+                                sleepTimerTotal = sleepTimerTotal,
+                                sleepTimerPauseAfterTrack = sleepTimerPauseAfterTrack,
+                                currentPlayingFolderName = currentPlayingFolderName,
+                                isCurrentTrackFavourite = favourites.any { it.fileId == currentPlayingFileId },
+                                onToggleCurrentFavourite = {
+                                    viewModel.toggleCurrentFavourite()
+                                },
+                                sessionRole = sessionRole,
+                                onNeedsTokenRefresh = { viewModel.refreshAuthTokenAndRetry() },
+                                onClearQueue = { viewModel.clearQueue() },
+                                onPlayQueueItem = { file -> viewModel.playAudio(file) },
+                                onCollapse = { isPlayerExpanded = false },
+                                onSetSleepTimer = { mins -> viewModel.setSleepTimer(mins) },
+                                onCancelSleepTimer = { viewModel.cancelSleepTimer() },
+                                onSetSleepTimerBehavior = { b -> viewModel.setSleepTimerBehavior(b) },
+                                isShuffleEnabled = isShuffleEnabled,
+                                onToggleShuffle = { viewModel.toggleShuffle() },
+                                listState = queueListState
+                            )
+                        }
                     } // End of AnimatedVisibility
                     
                     // Top-aligned Snackbar anchored safely above the layout bounds
@@ -1642,7 +1653,10 @@ fun PlaybackBottomSheet(
     onCollapse: () -> Unit = {},
     onSetSleepTimer: (Int) -> Unit = {},
     onCancelSleepTimer: () -> Unit = {},
-    onSetSleepTimerBehavior: (Boolean) -> Unit = {}
+    onSetSleepTimerBehavior: (Boolean) -> Unit = {},
+    isShuffleEnabled: Boolean = false,
+    onToggleShuffle: () -> Unit = {},
+    listState: androidx.compose.foundation.lazy.LazyListState = androidx.compose.foundation.lazy.rememberLazyListState()
 ) {
     var playWhenReady by remember { mutableStateOf(false) }
     var showSleepTimerDialog by remember { mutableStateOf(false) }
@@ -1853,32 +1867,54 @@ fun PlaybackBottomSheet(
         animationSpec = tween(1000)
     )
 
-    LazyColumn(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(androidx.compose.ui.graphics.Brush.verticalGradient(colors = listOf(animatedColor, androidx.compose.ui.graphics.Color(0xFF09090E))))
+    val nestedScrollConnection = remember(listState) {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (available.y > 0f && listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0) {
+                    onCollapse()
+                    return Offset(0f, available.y)
+                }
+                return Offset.Zero
+            }
+
+            override fun onPostScroll(
+                consumed: Offset,
+                available: Offset,
+                source: NestedScrollSource
+            ): Offset {
+                if (available.y > 0f && listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0) {
+                    onCollapse()
+                    return Offset(0f, available.y)
+                }
+                return Offset.Zero
+            }
+        }
+    }
+
+    Box(
+        modifier = Modifier.fillMaxSize()
     ) {
-        // 1. Static Elements (Top Bar, Album Art, Metadata, Scrubber, Play Controls)
-        item {
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                // 2. The Top Bar
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(start = 24.dp, top = 48.dp, end = 24.dp, bottom = 0.dp)
-                        .pointerInput(Unit) {
-                            detectVerticalDragGestures { _, dragAmount ->
-                                if (dragAmount > 30f) {
-                                    onCollapse()
-                                }
-                            }
-                        },
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+        LazyColumn(
+            state = listState,
+            modifier = Modifier
+                .fillMaxSize()
+                .nestedScroll(nestedScrollConnection)
+                .background(androidx.compose.ui.graphics.Brush.verticalGradient(colors = listOf(animatedColor, androidx.compose.ui.graphics.Color(0xFF09090E))))
+        ) {
+            // 1. Static Elements (Top Bar, Album Art, Metadata, Scrubber, Play Controls)
+            item {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally
                 ) {
+                    // 2. The Top Bar
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 24.dp, top = 48.dp, end = 24.dp, bottom = 0.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                 IconButton(onClick = onCollapse) {
                     Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Close", tint = androidx.compose.ui.graphics.Color.White)
                 }
@@ -2118,18 +2154,25 @@ fun PlaybackBottomSheet(
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically
         ) {
+            val isShuffled = isShuffleEnabled || shuffleModeEnabled
             IconButton(
-                onClick = { controller?.shuffleModeEnabled = !shuffleModeEnabled },
+                onClick = { 
+                    if (onToggleShuffle != {}) {
+                        onToggleShuffle()
+                    } else {
+                        controller?.shuffleModeEnabled = !shuffleModeEnabled
+                    }
+                },
                 enabled = sessionRole != SessionRole.GUEST
             ) {
                 Box(contentAlignment = Alignment.TopCenter) {
                     Icon(
                         Icons.Default.Shuffle,
                         contentDescription = "Shuffle",
-                        tint = if (shuffleModeEnabled) MaterialTheme.colorScheme.primary else androidx.compose.ui.graphics.Color.Gray,
+                        tint = if (isShuffled) MaterialTheme.colorScheme.primary else androidx.compose.ui.graphics.Color.Gray,
                         modifier = Modifier.size(24.dp)
                     )
-                    if (shuffleModeEnabled) {
+                    if (isShuffled) {
                         val shuffleDotColor = MaterialTheme.colorScheme.primary
                         androidx.compose.foundation.Canvas(modifier = Modifier.size(24.dp)) {
                             drawCircle(
@@ -2275,6 +2318,7 @@ fun PlaybackBottomSheet(
             Spacer(modifier = Modifier.windowInsetsBottomHeight(WindowInsets.navigationBars).padding(bottom = 32.dp))
         }
     }
+    }
 }
 
 @Composable
@@ -2283,6 +2327,7 @@ fun MiniPlayer(
     currentSpotifyArtUrl: String?,
     songThumbnails: Map<String, String> = emptyMap(),
     sessionRole: SessionRole,
+    modifier: Modifier = Modifier,
     onExpand: () -> Unit
 ) {
     var playWhenReady by remember { mutableStateOf(controller?.playWhenReady ?: false) }
@@ -2365,21 +2410,27 @@ fun MiniPlayer(
 
     val animatedColor by animateColorAsState(targetValue = dominantColor, animationSpec = tween(1000))
 
-    Box(
-        modifier = Modifier
+    Column(
+        modifier = modifier
             .fillMaxWidth()
-            .height(72.dp)
-            .shadow(elevation = 16.dp)
             .background(animatedColor)
-            .pointerInput(Unit) {
-                detectVerticalDragGestures { _, dragAmount ->
-                    if (dragAmount < -2f) {
-                        onExpand()
+            .navigationBarsPadding()
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(72.dp)
+                .shadow(elevation = 16.dp)
+                .background(animatedColor)
+                .pointerInput(Unit) {
+                    detectVerticalDragGestures { _, dragAmount ->
+                        if (dragAmount < -2f) {
+                            onExpand()
+                        }
                     }
                 }
-            }
-            .clickable { onExpand() }
-    ) {
+                .clickable { onExpand() }
+        ) {
         Row(
             modifier = Modifier
                 .fillMaxSize()
@@ -2484,6 +2535,7 @@ fun MiniPlayer(
             color = MaterialTheme.colorScheme.primary,
             trackColor = androidx.compose.ui.graphics.Color.Transparent,
         )
+    }
     }
 }
 

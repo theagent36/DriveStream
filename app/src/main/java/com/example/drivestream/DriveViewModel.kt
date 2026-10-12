@@ -177,53 +177,47 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
     private val _isShuffleEnabled = MutableStateFlow(false)
     val isShuffleEnabled: StateFlow<Boolean> = _isShuffleEnabled.asStateFlow()
 
-    private var originalMasterPlaylist: List<DriveFile> = emptyList()
-    private var isPlaylistCurrentlyShuffled = false
+    private val _originalPlaylist = MutableStateFlow<List<DriveFile>>(emptyList())
+    val originalPlaylist: StateFlow<List<DriveFile>> = _originalPlaylist.asStateFlow()
+
+    private val _activeQueue = MutableStateFlow<List<DriveFile>>(emptyList())
+    val activeQueue: StateFlow<List<DriveFile>> = _activeQueue.asStateFlow()
 
     fun toggleShuffle() {
-        hostController?.let {
-            val newState = !it.shuffleModeEnabled
-            it.shuffleModeEnabled = newState
-            _isShuffleEnabled.value = newState
-            handleShuffleToggled(newState)
-        }
+        hostController?.shuffleModeEnabled = false // Disable ExoPlayer's native shuffle mode completely
+        val newState = !_isShuffleEnabled.value
+        _isShuffleEnabled.value = newState
+        handleShuffleToggled(newState)
     }
 
     private fun handleShuffleToggled(enabled: Boolean) {
-        if (isPlaylistCurrentlyShuffled == enabled) return
-        isPlaylistCurrentlyShuffled = enabled
+        val origList = _originalPlaylist.value
+        if (origList.isEmpty()) return
 
-        val currentList = _masterPlaylist.value
-        if (currentList.isEmpty()) return
-
+        val currentQueue = _activeQueue.value
         val currIdx = _currentIndex.value
-        val currentSong = if (currIdx in currentList.indices) currentList[currIdx] else null
+        val currentSong = if (currIdx in currentQueue.indices) currentQueue[currIdx] else null
 
         if (enabled) {
-            if (originalMasterPlaylist.isEmpty() || originalMasterPlaylist.size != currentList.size) {
-                originalMasterPlaylist = currentList
-            }
-            if (currentSong != null) {
-                val remaining = currentList.filter { it.fileId != currentSong.fileId }.shuffled()
-                _masterPlaylist.value = listOf(currentSong) + remaining
-                _currentIndex.value = 0
+            val shuffled = origList.shuffled()
+            _activeQueue.value = shuffled
+            val newIndex = if (currentSong != null) {
+                shuffled.indexOfFirst { it.fileId == currentSong.fileId }.coerceAtLeast(0)
             } else {
-                _masterPlaylist.value = currentList.shuffled()
-                _currentIndex.value = 0
+                0
             }
+            _currentIndex.value = newIndex
         } else {
-            if (originalMasterPlaylist.isNotEmpty()) {
-                val restored = originalMasterPlaylist
-                val newIndex = if (currentSong != null) {
-                    restored.indexOfFirst { it.fileId == currentSong.fileId }.coerceAtLeast(0)
-                } else {
-                    0
-                }
-                _masterPlaylist.value = restored
-                _currentIndex.value = newIndex
+            _activeQueue.value = origList
+            val restoredIndex = if (currentSong != null) {
+                origList.indexOfFirst { it.fileId == currentSong.fileId }.coerceAtLeast(0)
+            } else {
+                0
             }
+            _currentIndex.value = restoredIndex
         }
-        activeAudioPlaylist = _masterPlaylist.value
+        activeAudioPlaylist = _activeQueue.value
+        prefetchNextSongLookAhead()
     }
     
     private val _currentPlayingFolderName = MutableStateFlow<String?>("My Drive")
@@ -249,21 +243,20 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
     fun clearPlaybackError() { _playbackErrorMessage.value = null }
 
     // Master Playlist & Index State
-    private val _masterPlaylist = MutableStateFlow<List<DriveFile>>(emptyList())
-    val masterPlaylist: StateFlow<List<DriveFile>> = _masterPlaylist.asStateFlow()
+    val masterPlaylist: StateFlow<List<DriveFile>> = _activeQueue.asStateFlow()
 
     private val _currentIndex = MutableStateFlow(0)
     val currentIndex: StateFlow<Int> = _currentIndex.asStateFlow()
 
     // Derived UI Upcoming Queue
     val upcomingQueue: StateFlow<List<DriveFile>> = combine(
-        _masterPlaylist,
+        _activeQueue,
         _currentIndex
-    ) { playlist, index ->
-        if (playlist.isEmpty() || index < 0 || index >= playlist.size - 1) {
+    ) { queue, index ->
+        if (queue.isEmpty() || index < 0 || index >= queue.size - 1) {
             emptyList()
         } else {
-            playlist.subList(index + 1, playlist.size)
+            queue.subList(index + 1, queue.size)
         }
     }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
@@ -628,7 +621,8 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
         controllerFuture.addListener({
             val controller = controllerFuture.get()
             hostController = controller
-            _isShuffleEnabled.value = controller.shuffleModeEnabled
+            controller.shuffleModeEnabled = false // Disable ExoPlayer's native shuffle mode completely
+            _isShuffleEnabled.value = false
             if (_sessionRole.value != SessionRole.GUEST) {
                 _player.value = controller
             }
@@ -641,27 +635,29 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
                         controller.pause()
                         return
                     }
-                    // Update currently playing file ID and index in master playlist
+                    // Update currently playing file ID and index in activeQueue without reshuffling
                     _currentPlayingFileId.value = mediaItem?.mediaId
                     val currentId = mediaItem?.mediaId
                     if (currentId != null) {
-                        val idx = _masterPlaylist.value.indexOfFirst { it.fileId == currentId }
+                        val idx = _activeQueue.value.indexOfFirst { it.fileId == currentId }
                         if (idx != -1) {
                             _currentIndex.value = idx
                         }
                     }
 
-                    // Look-Ahead Queue Resolution: Maintain next upcoming MediaItem in queue
+                    // Look-Ahead Queue Resolution: Maintain next upcoming MediaItem sequentially from activeQueue
                     prefetchNextSongLookAhead()
                 }
 
                 override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) {
+                    // Strictly preserve current playlist order. No manual list-shuffling on track or timeline transitions.
                 }
 
                 override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
-                    _isShuffleEnabled.value = shuffleModeEnabled
-                    handleShuffleToggled(shuffleModeEnabled)
-                    prefetchNextSongLookAhead()
+                    // ExoPlayer native shuffle mode is completely disabled; enforce false on player
+                    if (shuffleModeEnabled) {
+                        controller.shuffleModeEnabled = false
+                    }
                 }
 
                 override fun onRepeatModeChanged(repeatMode: Int) {
@@ -733,8 +729,8 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
         val currentState = _uiState.value
         val audioFiles = if (isFromSearch) {
             (search as SearchState.Results).files.filter { !it.isFolder }
-        } else if (_masterPlaylist.value.any { it.fileId == file.fileId }) {
-            _masterPlaylist.value
+        } else if (_activeQueue.value.any { it.fileId == file.fileId }) {
+            _activeQueue.value
         } else if (currentState is DriveUiState.Success) {
             val hasFile = currentState.files.any { it.fileId == file.fileId }
             if (hasFile) currentState.files.filter { !it.isFolder } else listOf(file)
@@ -831,22 +827,17 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
                     .build()
             }
             
-            originalMasterPlaylist = if (originalMasterPlaylist.isEmpty() || !originalMasterPlaylist.any { it.fileId == file.fileId }) {
-                audioFiles
+            _originalPlaylist.value = audioFiles
+            val startIndex = if (_isShuffleEnabled.value) {
+                val shuffled = audioFiles.shuffled()
+                _activeQueue.value = shuffled
+                shuffled.indexOfFirst { it.fileId == file.fileId }.coerceAtLeast(0)
             } else {
-                originalMasterPlaylist
+                _activeQueue.value = audioFiles
+                audioFiles.indexOfFirst { it.fileId == file.fileId }.coerceAtLeast(0)
             }
-            isPlaylistCurrentlyShuffled = _isShuffleEnabled.value
-            if (_isShuffleEnabled.value) {
-                val remaining = audioFiles.filter { it.fileId != file.fileId }.shuffled()
-                _masterPlaylist.value = listOf(file) + remaining
-                _currentIndex.value = 0
-            } else {
-                _masterPlaylist.value = audioFiles
-                val startIndex = audioFiles.indexOfFirst { it.fileId == file.fileId }.coerceAtLeast(0)
-                _currentIndex.value = startIndex
-            }
-            activeAudioPlaylist = _masterPlaylist.value
+            _currentIndex.value = startIndex
+            activeAudioPlaylist = _activeQueue.value
             audioFiles.forEach { f ->
                 activeMediaMap[f.fileId] = f
                 if (f.name.endsWith(".flac", ignoreCase = true) || f.name.endsWith(".wav", ignoreCase = true) ||
@@ -856,10 +847,9 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
                     knownMp3FileIds.add(f.fileId)
                 }
             }
-            
-            val startIndex = audioFiles.indexOfFirst { it.fileId == file.fileId }.coerceAtLeast(0)
 
             hostController?.run {
+                shuffleModeEnabled = false // Disable ExoPlayer's native shuffle mode completely
                 setMediaItems(mediaItems, startIndex, androidx.media3.common.C.TIME_UNSET)
                 prepare()
                 play()
@@ -954,16 +944,15 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
                         .build()
                 }
 
-                originalMasterPlaylist = files
-                isPlaylistCurrentlyShuffled = _isShuffleEnabled.value
+                _originalPlaylist.value = files
                 if (_isShuffleEnabled.value) {
-                    _masterPlaylist.value = files.shuffled()
+                    _activeQueue.value = files.shuffled()
                     _currentIndex.value = 0
                 } else {
-                    _masterPlaylist.value = files
+                    _activeQueue.value = files
                     _currentIndex.value = 0
                 }
-                activeAudioPlaylist = _masterPlaylist.value
+                activeAudioPlaylist = _activeQueue.value
                 files.forEach { file ->
                     activeMediaMap[file.fileId] = file
                     if (file.name.endsWith(".flac", ignoreCase = true) || file.name.endsWith(".wav", ignoreCase = true) ||
@@ -975,6 +964,7 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
                 }
 
                 hostController?.run {
+                    shuffleModeEnabled = false // Disable ExoPlayer's native shuffle mode completely
                     clearMediaItems()
                     setMediaItems(mediaItems)
                     prepare()
@@ -1212,43 +1202,18 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
             val currentIndex = player.currentMediaItemIndex
             if (currentIndex == androidx.media3.common.C.INDEX_UNSET) return@launch
 
-            val timeline = player.currentTimeline
-            val repeatMode = player.repeatMode
-            val shuffleEnabled = player.shuffleModeEnabled
+            // Strictly pull the next song sequentially (currentIndex + 1) from the activeQueue state
+            val queue = _activeQueue.value
+            if (queue.isEmpty()) return@launch
 
-            // 1. Maintain next upcoming MediaItem based on playback state (Shuffle, Repeat, or standard sequence)
-            var nextDriveFile: DriveFile? = null
-            var nextTimelineIndex = androidx.media3.common.C.INDEX_UNSET
-
-            if (!timeline.isEmpty && totalItems > 0) {
-                nextTimelineIndex = timeline.getNextWindowIndex(currentIndex, repeatMode, shuffleEnabled)
-                if (nextTimelineIndex != androidx.media3.common.C.INDEX_UNSET && nextTimelineIndex < totalItems) {
-                    val item = player.getMediaItemAt(nextTimelineIndex)
-                    nextDriveFile = (item.localConfiguration?.tag as? DriveFile)
-                        ?: activeMediaMap[item.mediaId]
-                }
-            }
-
-            // Fallback / Look-ahead for single track queue or when timeline has not queued the next item:
-            val playlist = _masterPlaylist.value
-            if (nextDriveFile == null && playlist.isNotEmpty()) {
-                val currentMediaId = player.currentMediaItem?.mediaId
-                val currentPlaylistIndex = if (currentMediaId != null) {
-                    val found = playlist.indexOfFirst { it.fileId == currentMediaId }
-                    if (found != -1) found else _currentIndex.value
-                } else {
-                    _currentIndex.value
-                }
-
-                if (repeatMode == Player.REPEAT_MODE_ONE && currentPlaylistIndex in playlist.indices) {
-                    nextDriveFile = playlist[currentPlaylistIndex]
-                } else if (currentPlaylistIndex in playlist.indices) {
-                    if (currentPlaylistIndex + 1 < playlist.size) {
-                        nextDriveFile = playlist[currentPlaylistIndex + 1]
-                    } else if (repeatMode == Player.REPEAT_MODE_ALL && playlist.isNotEmpty()) {
-                        nextDriveFile = playlist[0]
-                    }
-                }
+            val currIdx = _currentIndex.value
+            val nextIdx = currIdx + 1
+            val nextDriveFile = if (nextIdx in queue.indices) {
+                queue[nextIdx]
+            } else if (player.repeatMode == Player.REPEAT_MODE_ALL && queue.isNotEmpty()) {
+                queue[0]
+            } else {
+                null
             }
 
             val targetFile = nextDriveFile ?: return@launch
@@ -1346,17 +1311,16 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
 
             // 3. Insert this resolved MediaItem into ExoPlayer using player.addMediaItem()
             // so ExoPlayer's DefaultLoadControl can begin caching it seamlessly in the background
-            if (nextTimelineIndex != androidx.media3.common.C.INDEX_UNSET &&
-                nextTimelineIndex != currentIndex &&
-                nextTimelineIndex < player.mediaItemCount) {
-                val existingItem = player.getMediaItemAt(nextTimelineIndex)
+            val upcomingIndex = if (player.mediaItemCount > 0) player.currentMediaItemIndex + 1 else 0
+            if (upcomingIndex < player.mediaItemCount) {
+                val existingItem = player.getMediaItemAt(upcomingIndex)
                 val existingUri = existingItem.localConfiguration?.uri
                 val newUri = resolvedMediaItem.localConfiguration?.uri
                 if (existingUri != newUri) {
-                    player.removeMediaItem(nextTimelineIndex)
-                    player.addMediaItem(nextTimelineIndex, resolvedMediaItem)
+                    player.removeMediaItem(upcomingIndex)
+                    player.addMediaItem(upcomingIndex, resolvedMediaItem)
                 }
-            } else if (nextTimelineIndex != currentIndex) {
+            } else {
                 player.addMediaItem(resolvedMediaItem)
             }
         }
@@ -1427,9 +1391,9 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
                 .setMediaMetadata(mediaMetadata).setRequestMetadata(requestMetadata).setTag(file).build()
                 
             activeMediaMap[file.fileId] = file
-            _masterPlaylist.value = _masterPlaylist.value + file
-            originalMasterPlaylist = originalMasterPlaylist + file
-            activeAudioPlaylist = _masterPlaylist.value
+            _originalPlaylist.value = _originalPlaylist.value + file
+            _activeQueue.value = _activeQueue.value + file
+            activeAudioPlaylist = _activeQueue.value
             if (file.name.endsWith(".flac", ignoreCase = true) || file.name.endsWith(".wav", ignoreCase = true) ||
                 file.mimeType.contains("flac", ignoreCase = true) || file.mimeType.contains("wav", ignoreCase = true)) {
                 knownLosslessFileIds.add(file.fileId)
@@ -1453,10 +1417,11 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
                 _playbackErrorMessage.value = "Queue cleared"
             }
             val currentFile = currentPlayingFile
-            _masterPlaylist.value = if (currentFile != null) listOf(currentFile) else emptyList()
-            originalMasterPlaylist = _masterPlaylist.value
+            val single = if (currentFile != null) listOf(currentFile) else emptyList()
+            _originalPlaylist.value = single
+            _activeQueue.value = single
             _currentIndex.value = 0
-            activeAudioPlaylist = _masterPlaylist.value
+            activeAudioPlaylist = single
         }
     }
 
@@ -1590,9 +1555,9 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun syncQueueToPlayer(sortedSongs: List<DriveFile>) {
         viewModelScope.launch {
-            originalMasterPlaylist = sortedSongs
-            isPlaylistCurrentlyShuffled = false
-            _masterPlaylist.value = sortedSongs
+            _originalPlaylist.value = sortedSongs
+            _activeQueue.value = sortedSongs
+            _isShuffleEnabled.value = false
             val currentId = _currentPlayingFileId.value
             _currentIndex.value = if (currentId != null) {
                 sortedSongs.indexOfFirst { it.fileId == currentId }.coerceAtLeast(0)
@@ -1970,8 +1935,8 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
         val trackId = themeRepository.currentTrackIdFlow.firstOrNull()
         val position = themeRepository.currentPositionFlow.firstOrNull() ?: 0L
         
-        _masterPlaylist.value = queue
-        originalMasterPlaylist = queue
+        _originalPlaylist.value = queue
+        _activeQueue.value = queue
         _currentIndex.value = if (trackId != null) queue.indexOfFirst { it.fileId == trackId }.coerceAtLeast(0) else 0
         _currentPlayingFileId.value = trackId
         activeAudioPlaylist = queue
@@ -2006,8 +1971,8 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
     fun saveSessionPlaybackState() {
         val player = hostController ?: return
         viewModelScope.launch {
-            val fullQueue = if (_masterPlaylist.value.isNotEmpty()) {
-                _masterPlaylist.value
+            val fullQueue = if (_activeQueue.value.isNotEmpty()) {
+                _activeQueue.value
             } else {
                 val totalItems = player.mediaItemCount
                 val queueList = mutableListOf<DriveFile>()
