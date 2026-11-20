@@ -235,47 +235,6 @@ class PlaybackService : MediaSessionService() {
                 }
             }
 
-            override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
-                if (shuffleModeEnabled) {
-                    val p = player ?: return
-                    val count = p.mediaItemCount
-                    val current = p.currentMediaItemIndex
-                    if (count > 1 && current != C.INDEX_UNSET) {
-                        val indices = IntArray(count) { it }
-                        val random = java.util.Random()
-                        
-                        if (current < count - 1) {
-                            // Preserve 0 to current. Shuffle from current + 1 to end.
-                            for (i in count - 1 downTo current + 2) {
-                                val j = (current + 1) + random.nextInt(i - current)
-                                val temp = indices[i]
-                                indices[i] = indices[j]
-                                indices[j] = temp
-                            }
-                        } else {
-                            // If we are at the very end, we might as well just shuffle everything 
-                            // except the current one (which we put at the end).
-                            for (i in count - 1 downTo 1) {
-                                val j = random.nextInt(i + 1)
-                                val temp = indices[i]
-                                indices[i] = indices[j]
-                                indices[j] = temp
-                            }
-                            // Swap current to the end
-                            val indexOfCurrent = indices.indexOf(current)
-                            if (indexOfCurrent != count - 1 && indexOfCurrent != -1) {
-                                val temp = indices[count - 1]
-                                indices[count - 1] = indices[indexOfCurrent]
-                                indices[indexOfCurrent] = temp
-                            }
-                        }
-                        
-                        val shuffleOrder = androidx.media3.exoplayer.source.ShuffleOrder.DefaultShuffleOrder(indices, random.nextLong())
-                        p.setShuffleOrder(shuffleOrder)
-                    }
-                }
-            }
-
             override fun onAudioSessionIdChanged(audioSessionId: Int) {
                 initAudioEffects(audioSessionId)
             }

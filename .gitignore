@@ -52,6 +52,8 @@ desktop.ini
 build_output.txt
 custom_log.txt
 TestGson.kt
+bundle_source.py
+drivestream_source_bundle.md
 
 # Profiling and memory dumps
 captures/

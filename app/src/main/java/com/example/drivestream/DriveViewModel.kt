@@ -183,6 +183,8 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
     private val _activeQueue = MutableStateFlow<List<DriveFile>>(emptyList())
     val activeQueue: StateFlow<List<DriveFile>> = _activeQueue.asStateFlow()
 
+    private var activeSourceFolderId: String? = null
+
     fun toggleShuffle() {
         hostController?.shuffleModeEnabled = false // Disable ExoPlayer's native shuffle mode completely
         val newState = !_isShuffleEnabled.value
@@ -199,14 +201,13 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
         val currentSong = if (currIdx in currentQueue.indices) currentQueue[currIdx] else null
 
         if (enabled) {
-            val shuffled = origList.shuffled()
-            _activeQueue.value = shuffled
-            val newIndex = if (currentSong != null) {
-                shuffled.indexOfFirst { it.fileId == currentSong.fileId }.coerceAtLeast(0)
+            val shuffled = if (currentSong != null) {
+                listOf(currentSong) + origList.filter { it.fileId != currentSong.fileId }.shuffled()
             } else {
-                0
+                origList.shuffled()
             }
-            _currentIndex.value = newIndex
+            _activeQueue.value = shuffled
+            _currentIndex.value = 0
         } else {
             _activeQueue.value = origList
             val restoredIndex = if (currentSong != null) {
@@ -217,6 +218,15 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
             _currentIndex.value = restoredIndex
         }
         activeAudioPlaylist = _activeQueue.value
+
+        hostController?.let { player ->
+            val pIdx = player.currentMediaItemIndex
+            val count = player.mediaItemCount
+            if (pIdx != androidx.media3.common.C.INDEX_UNSET && count > pIdx + 1) {
+                player.removeMediaItems(pIdx + 1, count)
+            }
+        }
+
         prefetchNextSongLookAhead()
     }
     
@@ -720,150 +730,318 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
 
     fun playFile(file: DriveFile) = playAudio(file)
 
-    fun playAudio(file: DriveFile) {
-        currentPlayingFile = file
-        val search = _searchState.value
-        val isFromSearch = search is SearchState.Results && search.files.any { it.fileId == file.fileId }
-        _currentPlayingFolderName.value = if (isFromSearch) "Search Results" else myDriveStack.lastOrNull()?.second ?: "My Drive"
+    fun playAudio(file: DriveFile, fromQueue: Boolean = false) {
+        viewModelScope.launch {
+            try {
+                val existingQueue = _activeQueue.value
+                val existingIdx = existingQueue.indexOfFirst { it.fileId == file.fileId }
 
-        val currentState = _uiState.value
-        val audioFiles = if (isFromSearch) {
-            (search as SearchState.Results).files.filter { !it.isFolder }
-        } else if (_activeQueue.value.any { it.fileId == file.fileId }) {
-            _activeQueue.value
-        } else if (currentState is DriveUiState.Success) {
-            val hasFile = currentState.files.any { it.fileId == file.fileId }
-            if (hasFile) currentState.files.filter { !it.isFolder } else listOf(file)
-        } else {
-            listOf(file)
+                val currentScreenSongs = when {
+                    _searchQuery.value.length >= 2 && _searchState.value is SearchState.Results ->
+                        (_searchState.value as SearchState.Results).files.filter { !it.isFolder }
+                    _uiState.value is DriveUiState.Success ->
+                        (_uiState.value as DriveUiState.Success).files.filter { !it.isFolder }
+                    else -> emptyList()
+                }
+
+                val isSameQueue = existingIdx != -1
+
+                currentPlayingFile = file
+                _currentPlayingFileId.value = file.fileId
+
+                // BRANCH A: Track belongs to the current active queue -> NEVER reshuffle
+                if (isSameQueue) {
+                    val updatedQueue: List<DriveFile>
+                    val targetIdx: Int
+
+                    if (_isShuffleEnabled.value && !fromQueue) {
+                        val prevSong = existingQueue.getOrNull(_currentIndex.value)
+                        updatedQueue = if (prevSong != null && prevSong.fileId != file.fileId) {
+                            // Pin clicked song at index 0, keep the rest of the shuffled queue in its
+                            // exact prior order, and move the previously playing song to the end
+                            // so it does NOT appear at the top of "Up Next".
+                            val remainingInOrder = existingQueue.filter {
+                                it.fileId != file.fileId && it.fileId != prevSong.fileId
+                            }
+                            listOf(file) + remainingInOrder + listOf(prevSong)
+                        } else {
+                            listOf(file) + existingQueue.filter { it.fileId != file.fileId }
+                        }
+                        targetIdx = 0
+                        _activeQueue.value = updatedQueue
+                    } else {
+                        // Sequential mode OR tapped directly inside "Up Next"
+                        updatedQueue = existingQueue
+                        targetIdx = existingIdx
+                    }
+
+                    _currentIndex.value = targetIdx
+                    activeAudioPlaylist = updatedQueue
+
+                    val player = hostController
+                    if (player != null) {
+                        val playerIdx = (0 until player.mediaItemCount)
+                            .indexOfFirst { player.getMediaItemAt(it).mediaId == file.fileId }
+
+                        if (playerIdx != -1) {
+                            withContext(Dispatchers.Main) {
+                                player.shuffleModeEnabled = false
+                                val expectedNextId = updatedQueue.getOrNull(targetIdx + 1)?.fileId
+                                if (playerIdx + 1 < player.mediaItemCount &&
+                                    player.getMediaItemAt(playerIdx + 1).mediaId != expectedNextId
+                                ) {
+                                    player.removeMediaItems(playerIdx + 1, player.mediaItemCount)
+                                }
+                                player.seekTo(playerIdx, 0L)
+                                player.prepare()
+                                player.play()
+                                prefetchNextSongLookAhead()
+                            }
+                            return@launch
+                        }
+                    }
+
+                    val resolvedItem = buildSingleMediaItem(file) ?: return@launch
+                    withContext(Dispatchers.Main) {
+                        hostController?.run {
+                            shuffleModeEnabled = false
+                            setMediaItem(resolvedItem)
+                            prepare()
+                            play()
+                            prefetchNextSongLookAhead()
+                        }
+                    }
+                    return@launch
+                }
+
+                // BRANCH B: User started a brand-new playlist/folder -> shuffle ONCE with clicked track at index 0
+                val sourceList = if (currentScreenSongs.any { it.fileId == file.fileId }) {
+                    currentScreenSongs
+                } else {
+                    listOf(file)
+                }
+
+                _originalPlaylist.value = sourceList
+                activeSourceFolderId = _currentFolder.value.first
+                _currentPlayingFolderName.value = _currentFolder.value.second
+
+                val targetQueue: List<DriveFile>
+                val startIndex: Int
+
+                if (_isShuffleEnabled.value) {
+                    val remainingShuffled = sourceList
+                        .filter { it.fileId != file.fileId }
+                        .shuffled()
+                    targetQueue = listOf(file) + remainingShuffled
+                    startIndex = 0
+                } else {
+                    targetQueue = sourceList
+                    startIndex = sourceList.indexOfFirst { it.fileId == file.fileId }.coerceAtLeast(0)
+                }
+
+                _activeQueue.value = targetQueue
+                _currentIndex.value = startIndex
+                activeAudioPlaylist = targetQueue
+
+                val resolvedItem = buildSingleMediaItem(file) ?: return@launch
+                withContext(Dispatchers.Main) {
+                    hostController?.run {
+                        shuffleModeEnabled = false
+                        setMediaItem(resolvedItem)
+                        prepare()
+                        play()
+                        prefetchNextSongLookAhead()
+                    }
+                }
+            } catch (e: Exception) {
+                _playbackErrorMessage.value = "Playback error: ${e.message}"
+            }
+        }
+    }
+
+    private suspend fun buildSingleMediaItem(file: DriveFile): MediaItem? {
+        val token = try {
+            repository.getBearerToken() ?: run {
+                _playbackErrorMessage.value = "Failed to retrieve auth token for playback."
+                return null
+            }
+        } catch (e: UserRecoverableAuthException) {
+            _playbackErrorMessage.value = "Drive permission required. Please sign in again."
+            return null
         }
 
-        viewModelScope.launch {
+        PlaybackService.updateActiveToken(token)
+        activeMediaMap[file.fileId] = file
+
+        val isHighBandwidth = file.name.endsWith(".flac", ignoreCase = true) ||
+            file.name.endsWith(".wav", ignoreCase = true) ||
+            file.mimeType.contains("flac", ignoreCase = true) ||
+            file.mimeType.contains("wav", ignoreCase = true)
+
+        var currentFileId = file.fileId
+        var finalMimeType = file.mimeType
+        var mp3IdToStore: String? = null
+
+        if (_isDataSaverEnabled.value && isHighBandwidth) {
             var targetFolderId = mp3FolderId ?: repository.cachedMp3FolderId
             if (targetFolderId == null) {
                 targetFolderId = repository.resolveMp3FolderId()
                 mp3FolderId = targetFolderId
             }
-
-            val isClickedHighBandwidth = file.name.endsWith(".flac", ignoreCase = true) ||
-                    file.name.endsWith(".wav", ignoreCase = true) ||
-                    file.mimeType.contains("flac", ignoreCase = true) ||
-                    file.mimeType.contains("wav", ignoreCase = true)
-
-            var clickedMp3File: DriveFile? = null
-            if (_isDataSaverEnabled.value && isClickedHighBandwidth && targetFolderId != null) {
+            if (targetFolderId != null) {
                 val baseName = file.name.substringBeforeLast(".")
-                val targetName = "$baseName.mp3"
-                clickedMp3File = repository.findMp3InCentralFolder(targetName, targetFolderId)
-                if (clickedMp3File != null) {
-                    withContext(Dispatchers.Main) {
-                        android.widget.Toast.makeText(getApplication(), "Data Saver: Playing MP3 version", android.widget.Toast.LENGTH_SHORT).show()
-                    }
-                    _playbackErrorMessage.value = "Data Saver: Playing MP3 version"
-                }
-            }
-
-            var mp3Map: Map<String, DriveFile> = emptyMap()
-            if (_isDataSaverEnabled.value && targetFolderId != null && audioFiles.size > 1 && audioFiles.any {
-                it.name.endsWith(".flac", true) || it.name.endsWith(".wav", true) ||
-                it.mimeType.contains("flac") || it.mimeType.contains("wav")
-            }) {
-                mp3Map = repository.getMp3sInCentralFolder(targetFolderId)
-            }
-
-            val token = try {
-                repository.getBearerToken() ?: run {
-                    _uiState.value = DriveUiState.Error("Failed to retrieve auth token for playback.")
-                    return@launch
-                }
-            } catch (e: Exception) {
-                _uiState.value = DriveUiState.Error("Auth token error: ${e.message}")
-                return@launch
-            }
-            PlaybackService.updateActiveToken(token)
-
-            val mediaItems = audioFiles.map { f ->
-                activeMediaMap[f.fileId] = f
-                
-                val baseName = f.name.substringBeforeLast(".")
-                val isClicked = f.fileId == file.fileId
-                val mp3Equivalent = if (isClicked) clickedMp3File else mp3Map["$baseName.mp3"]
-                
-                var currentFileId = f.fileId
-                val fIsHighBandwidth = f.name.endsWith(".flac", ignoreCase = true) ||
-                        f.name.endsWith(".wav", ignoreCase = true) ||
-                        f.mimeType.contains("flac", ignoreCase = true) ||
-                        f.mimeType.contains("wav", ignoreCase = true)
-
-                if (_isDataSaverEnabled.value && mp3Equivalent != null && fIsHighBandwidth) {
+                val mp3Equivalent = repository.findMp3InCentralFolder("$baseName.mp3", targetFolderId)
+                if (mp3Equivalent != null && mp3Equivalent.fileId.isNotEmpty()) {
                     currentFileId = mp3Equivalent.fileId
-                }
-                
-                val uri = android.net.Uri.parse("https://www.googleapis.com/drive/v3/files/${currentFileId}?alt=media")
-                val artUrl = f.thumbnailUrl ?: _songThumbnails.value[f.fileId] ?: SpotifyAuthManager.getCachedArtUrl(f.name)
-                val mediaMetadata = androidx.media3.common.MediaMetadata.Builder()
-                    .setTitle(f.name)
-                    .setArtist("DriveStream")
-                    .apply {
-                        if (!artUrl.isNullOrEmpty()) {
-                            setArtworkUri(android.net.Uri.parse(artUrl))
-                        }
-                    }
-                    .build()
-                val requestMetadata = androidx.media3.common.MediaItem.RequestMetadata.Builder()
-                    .setExtras(android.os.Bundle().apply { 
-                        putString("auth_token", token)
-                        repository.activeAccountEmail?.let { putString("account_email", it) }
-                        if (mp3Equivalent != null) putString("mp3_id", mp3Equivalent.fileId)
-                    })
-                    .build()
-                androidx.media3.common.MediaItem.Builder()
-                    .setUri(uri)
-                    .setMediaId(f.fileId)
-                    .setMimeType(if (_isDataSaverEnabled.value && mp3Equivalent != null && fIsHighBandwidth) "audio/mpeg" else f.mimeType)
-                    .setMediaMetadata(mediaMetadata)
-                    .setRequestMetadata(requestMetadata)
-                    .setTag(f)
-                    .build()
-            }
-            
-            _originalPlaylist.value = audioFiles
-            val startIndex = if (_isShuffleEnabled.value) {
-                val shuffled = audioFiles.shuffled()
-                _activeQueue.value = shuffled
-                shuffled.indexOfFirst { it.fileId == file.fileId }.coerceAtLeast(0)
-            } else {
-                _activeQueue.value = audioFiles
-                audioFiles.indexOfFirst { it.fileId == file.fileId }.coerceAtLeast(0)
-            }
-            _currentIndex.value = startIndex
-            activeAudioPlaylist = _activeQueue.value
-            audioFiles.forEach { f ->
-                activeMediaMap[f.fileId] = f
-                if (f.name.endsWith(".flac", ignoreCase = true) || f.name.endsWith(".wav", ignoreCase = true) ||
-                    f.mimeType.contains("flac", ignoreCase = true) || f.mimeType.contains("wav", ignoreCase = true)) {
-                    knownLosslessFileIds.add(f.fileId)
-                } else if (f.name.endsWith(".mp3", ignoreCase = true) || f.mimeType.contains("mpeg", ignoreCase = true)) {
-                    knownMp3FileIds.add(f.fileId)
+                    finalMimeType = "audio/mpeg"
+                    mp3IdToStore = mp3Equivalent.fileId
+                    knownMp3FileIds.add(mp3Equivalent.fileId)
+                    activeMediaMap[mp3Equivalent.fileId] = mp3Equivalent
+                } else {
+                    knownLosslessFileIds.add(file.fileId)
                 }
             }
-
-            hostController?.run {
-                shuffleModeEnabled = false // Disable ExoPlayer's native shuffle mode completely
-                setMediaItems(mediaItems, startIndex, androidx.media3.common.C.TIME_UNSET)
-                prepare()
-                play()
-                prefetchNextSongLookAhead()
-            }
+        } else if (isHighBandwidth) {
+            knownLosslessFileIds.add(file.fileId)
+        } else {
+            knownMp3FileIds.add(file.fileId)
         }
+
+        val uri = Uri.parse("https://www.googleapis.com/drive/v3/files/${currentFileId}?alt=media")
+        val artUrl = file.thumbnailUrl
+            ?: _songThumbnails.value[file.fileId]
+            ?: SpotifyAuthManager.getCachedArtUrl(file.name)
+
+        val mediaMetadata = MediaMetadata.Builder()
+            .setTitle(file.name)
+            .setArtist("DriveStream")
+            .apply {
+                if (!artUrl.isNullOrEmpty()) {
+                    setArtworkUri(Uri.parse(artUrl))
+                }
+            }
+            .build()
+
+        val requestMetadata = MediaItem.RequestMetadata.Builder()
+            .setExtras(Bundle().apply {
+                putString("auth_token", token)
+                repository.activeAccountEmail?.let { putString("account_email", it) }
+                if (mp3IdToStore != null) putString("mp3_id", mp3IdToStore)
+            })
+            .build()
+
+        return MediaItem.Builder()
+            .setUri(uri)
+            .setMediaId(file.fileId)
+            .setMimeType(finalMimeType)
+            .setMediaMetadata(mediaMetadata)
+            .setRequestMetadata(requestMetadata)
+            .setTag(file)
+            .build()
     }
 
     fun playAll() {
         val currentState = _uiState.value
         if (currentState is DriveUiState.Success) {
-            val audioFiles = currentState.files.filter { !it.isFolder }
-            if (audioFiles.isNotEmpty()) {
-                playAudio(audioFiles.first())
+            val files = currentState.files.filter { !it.isFolder }
+            if (files.isEmpty()) return
+
+            currentPlayingFile = null
+            val search = _searchState.value
+            _currentPlayingFolderName.value = if (search is SearchState.Results) "Search Results" else myDriveStack.lastOrNull()?.second ?: "My Drive"
+
+            viewModelScope.launch {
+                try {
+                    val token = repository.getBearerToken() ?: run {
+                        _uiState.value = DriveUiState.Error("Failed to retrieve auth token for playback.")
+                        return@launch
+                    }
+                    PlaybackService.updateActiveToken(token)
+
+                    _originalPlaylist.value = files
+                    activeSourceFolderId = myDriveStack.last().first
+                    val queueToPlay = if (_isShuffleEnabled.value) files.shuffled() else files
+                    _activeQueue.value = queueToPlay
+                    _currentIndex.value = 0
+                    activeAudioPlaylist = queueToPlay
+                    currentPlayingFile = queueToPlay.firstOrNull()
+
+                    var mp3Map: Map<String, DriveFile> = emptyMap()
+                    var targetFolderId = mp3FolderId ?: repository.cachedMp3FolderId
+                    if (targetFolderId == null) {
+                        targetFolderId = repository.resolveMp3FolderId()
+                        mp3FolderId = targetFolderId
+                    }
+                    if (_isDataSaverEnabled.value && targetFolderId != null && queueToPlay.any { it.name.endsWith(".flac", true) || it.name.endsWith(".wav", true) || it.mimeType.contains("flac") || it.mimeType.contains("wav") }) {
+                        mp3Map = repository.getMp3sInCentralFolder(targetFolderId)
+                        if (mp3Map.isNotEmpty()) {
+                            _playbackErrorMessage.value = "Data Saver: Playing MP3 versions"
+                            withContext(Dispatchers.Main) {
+                                android.widget.Toast.makeText(getApplication(), "Data Saver: Playing MP3 versions", android.widget.Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }
+
+                    val mediaItems = queueToPlay.map { file ->
+                        activeMediaMap[file.fileId] = file
+                        
+                        val baseName = file.name.substringBeforeLast(".")
+                        val mp3Equivalent = mp3Map["$baseName.mp3"]
+                        
+                        var currentFileId = file.fileId
+                        if (_isDataSaverEnabled.value && mp3Equivalent != null && (file.name.endsWith(".flac", true) || file.name.endsWith(".wav", true) || file.mimeType.contains("flac") || file.mimeType.contains("wav"))) {
+                            currentFileId = mp3Equivalent.fileId
+                        }
+                        
+                        val uri = android.net.Uri.parse("https://www.googleapis.com/drive/v3/files/${currentFileId}?alt=media")
+                        val artUrl = file.thumbnailUrl ?: _songThumbnails.value[file.fileId] ?: SpotifyAuthManager.getCachedArtUrl(file.name)
+                        val mediaMetadata = androidx.media3.common.MediaMetadata.Builder()
+                            .setTitle(file.name)
+                            .setArtist("DriveStream")
+                            .apply {
+                                if (!artUrl.isNullOrEmpty()) {
+                                    setArtworkUri(android.net.Uri.parse(artUrl))
+                                }
+                            }
+                            .build()
+                        val requestMetadata = androidx.media3.common.MediaItem.RequestMetadata.Builder()
+                            .setExtras(android.os.Bundle().apply { 
+                                putString("auth_token", token)
+                                repository.activeAccountEmail?.let { putString("account_email", it) }
+                                if (mp3Equivalent != null) putString("mp3_id", mp3Equivalent.fileId)
+                            })
+                            .build()
+                        androidx.media3.common.MediaItem.Builder()
+                            .setUri(uri)
+                            .setMediaId(file.fileId)
+                            .setMimeType(file.mimeType)
+                            .setMediaMetadata(mediaMetadata)
+                            .setRequestMetadata(requestMetadata)
+                            .setTag(file)
+                            .build()
+                    }
+
+                    queueToPlay.forEach { file ->
+                        activeMediaMap[file.fileId] = file
+                        if (file.name.endsWith(".flac", ignoreCase = true) || file.name.endsWith(".wav", ignoreCase = true) ||
+                            file.mimeType.contains("flac", ignoreCase = true) || file.mimeType.contains("wav", ignoreCase = true)) {
+                            knownLosslessFileIds.add(file.fileId)
+                        } else if (file.name.endsWith(".mp3", ignoreCase = true) || file.mimeType.contains("mpeg", ignoreCase = true)) {
+                            knownMp3FileIds.add(file.fileId)
+                        }
+                    }
+
+                    hostController?.run {
+                        shuffleModeEnabled = false
+                        clearMediaItems()
+                        setMediaItems(mediaItems, 0, 0L)
+                        prepare()
+                        play()
+                        prefetchNextSongLookAhead()
+                    }
+                } catch (e: Exception) {
+                    _uiState.value = DriveUiState.Error("Failed to play all: ${e.message}")
+                }
             }
         }
     }
@@ -889,13 +1067,21 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 PlaybackService.updateActiveToken(token)
 
+                _originalPlaylist.value = files
+                activeSourceFolderId = folderId
+                val queueToPlay = if (_isShuffleEnabled.value) files.shuffled() else files
+                _activeQueue.value = queueToPlay
+                _currentIndex.value = 0
+                activeAudioPlaylist = queueToPlay
+                currentPlayingFile = queueToPlay.firstOrNull()
+
                 var mp3Map: Map<String, DriveFile> = emptyMap()
                 var targetFolderId = mp3FolderId ?: repository.cachedMp3FolderId
                 if (targetFolderId == null) {
                     targetFolderId = repository.resolveMp3FolderId()
                     mp3FolderId = targetFolderId
                 }
-                if (_isDataSaverEnabled.value && targetFolderId != null && files.any { it.name.endsWith(".flac", true) || it.name.endsWith(".wav", true) || it.mimeType.contains("flac") || it.mimeType.contains("wav") }) {
+                if (_isDataSaverEnabled.value && targetFolderId != null && queueToPlay.any { it.name.endsWith(".flac", true) || it.name.endsWith(".wav", true) || it.mimeType.contains("flac") || it.mimeType.contains("wav") }) {
                     mp3Map = repository.getMp3sInCentralFolder(targetFolderId)
                     if (mp3Map.isNotEmpty()) {
                         _playbackErrorMessage.value = "Data Saver: Playing MP3 versions"
@@ -905,7 +1091,7 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
 
-                val mediaItems = files.map { file ->
+                val mediaItems = queueToPlay.map { file ->
                     activeMediaMap[file.fileId] = file
                     
                     val baseName = file.name.substringBeforeLast(".")
@@ -944,16 +1130,7 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
                         .build()
                 }
 
-                _originalPlaylist.value = files
-                if (_isShuffleEnabled.value) {
-                    _activeQueue.value = files.shuffled()
-                    _currentIndex.value = 0
-                } else {
-                    _activeQueue.value = files
-                    _currentIndex.value = 0
-                }
-                activeAudioPlaylist = _activeQueue.value
-                files.forEach { file ->
+                queueToPlay.forEach { file ->
                     activeMediaMap[file.fileId] = file
                     if (file.name.endsWith(".flac", ignoreCase = true) || file.name.endsWith(".wav", ignoreCase = true) ||
                         file.mimeType.contains("flac", ignoreCase = true) || file.mimeType.contains("wav", ignoreCase = true)) {
@@ -966,7 +1143,7 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
                 hostController?.run {
                     shuffleModeEnabled = false // Disable ExoPlayer's native shuffle mode completely
                     clearMediaItems()
-                    setMediaItems(mediaItems)
+                    setMediaItems(mediaItems, 0, 0L)
                     prepare()
                     play()
                     prefetchNextSongLookAhead()
@@ -1937,6 +2114,7 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
         
         _originalPlaylist.value = queue
         _activeQueue.value = queue
+        activeSourceFolderId = null
         _currentIndex.value = if (trackId != null) queue.indexOfFirst { it.fileId == trackId }.coerceAtLeast(0) else 0
         _currentPlayingFileId.value = trackId
         activeAudioPlaylist = queue

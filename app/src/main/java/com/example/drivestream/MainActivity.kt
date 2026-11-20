@@ -370,7 +370,7 @@ class MainActivity : ComponentActivity() {
                                 sessionRole = sessionRole,
                                 onNeedsTokenRefresh = { viewModel.refreshAuthTokenAndRetry() },
                                 onClearQueue = { viewModel.clearQueue() },
-                                onPlayQueueItem = { file -> viewModel.playAudio(file) },
+                                onPlayQueueItem = { file -> viewModel.playAudio(file, fromQueue = true) },
                                 onCollapse = { isPlayerExpanded = false },
                                 onSetSleepTimer = { mins -> viewModel.setSleepTimer(mins) },
                                 onCancelSleepTimer = { viewModel.cancelSleepTimer() },
