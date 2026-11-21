@@ -29,6 +29,8 @@ keystore.properties
 keystore/
 *.jks
 *.keystore
+*.p12
+*.pfx
 
 # Google Services / Firebase credentials (CRITICAL)
 google-services.json
@@ -54,6 +56,10 @@ custom_log.txt
 TestGson.kt
 bundle_source.py
 drivestream_source_bundle.md
+*_source_bundle.md
+sync-notebook.md
+**/sync-notebook.md
+.agents/
 
 # Profiling and memory dumps
 captures/

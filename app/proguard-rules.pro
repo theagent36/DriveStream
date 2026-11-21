@@ -37,6 +37,8 @@
 # ── Google API Client (uses reflection heavily) ────────────────────────────
 -keep class com.google.api.** { *; }
 -keep class com.google.apis.** { *; }
+-keep class com.google.api.services.drive.** { *; }
+-keep class com.google.api.client.** { *; }
 -keep class com.google.http.client.** { *; }
 -dontwarn com.google.api.client.**
 -dontwarn com.google.api.client.extensions.android.**

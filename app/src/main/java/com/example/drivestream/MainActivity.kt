@@ -1,5 +1,8 @@
 package com.example.drivestream
 
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.ExperimentalFoundationApi
 import android.app.Activity
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -9,6 +12,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.ui.graphics.asImageBitmap
@@ -19,6 +23,10 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -67,6 +75,8 @@ import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.*
 import androidx.compose.animation.*
 import androidx.compose.material3.*
@@ -79,6 +89,7 @@ import androidx.compose.ui.composed
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.draw.alpha
@@ -91,6 +102,150 @@ import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.auth.api.signin.GoogleSignInOptions
 import com.google.android.gms.common.api.ApiException
 import com.google.api.services.drive.DriveScopes
+
+fun Modifier.bounceClick(
+    scaleDown: Float = 0.96f,
+    enabled: Boolean = true,
+    onClick: () -> Unit = {}
+): Modifier = composed {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (isPressed && enabled) scaleDown else 1f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMedium
+        ),
+        label = "bounce_scale"
+    )
+    this
+        .graphicsLayer {
+            scaleX = scale
+            scaleY = scale
+        }
+        .clickable(
+            interactionSource = interactionSource,
+            indication = androidx.compose.foundation.LocalIndication.current,
+            enabled = enabled,
+            onClick = onClick
+        )
+}
+
+@Composable
+fun AnimatedPlayPauseIcon(
+    isPlaying: Boolean,
+    contentDescription: String?,
+    tint: Color = LocalContentColor.current,
+    modifier: Modifier = Modifier
+) {
+    AnimatedContent(
+        targetState = isPlaying,
+        transitionSpec = {
+            (scaleIn(initialScale = 0.72f, animationSpec = tween(160, easing = FastOutSlowInEasing)) +
+                fadeIn(animationSpec = tween(140))) togetherWith
+                (scaleOut(targetScale = 0.72f, animationSpec = tween(130)) +
+                    fadeOut(animationSpec = tween(120)))
+        },
+        label = "play_pause_morph"
+    ) { playing ->
+        Icon(
+            imageVector = if (playing) Icons.Default.Pause else Icons.Default.PlayArrow,
+            contentDescription = contentDescription,
+            tint = tint,
+            modifier = modifier
+        )
+    }
+}
+
+@Composable
+fun AnimatedFavoriteButton(
+    isFavourite: Boolean,
+    onToggle: () -> Unit,
+    modifier: Modifier = Modifier,
+    iconSize: androidx.compose.ui.unit.Dp = 24.dp,
+    activeColor: Color = Color.Red,
+    inactiveColor: Color = MaterialTheme.colorScheme.onSurfaceVariant
+) {
+    var firstRender by remember { mutableStateOf(true) }
+    val favScale = remember { Animatable(1f) }
+    LaunchedEffect(isFavourite) {
+        if (firstRender) {
+            firstRender = false
+        } else {
+            favScale.snapTo(1.28f)
+            favScale.animateTo(
+                targetValue = 1f,
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioMediumBouncy,
+                    stiffness = Spring.StiffnessMedium
+                )
+            )
+        }
+    }
+    val favColor by animateColorAsState(
+        targetValue = if (isFavourite) activeColor else inactiveColor,
+        animationSpec = tween(durationMillis = 200),
+        label = "fav_color"
+    )
+
+    IconButton(
+        onClick = onToggle,
+        modifier = modifier
+    ) {
+        Icon(
+            imageVector = if (isFavourite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+            contentDescription = if (isFavourite) "Remove from Favourites" else "Add to Favourites",
+            tint = favColor,
+            modifier = Modifier
+                .size(iconSize)
+                .graphicsLayer {
+                    scaleX = favScale.value
+                    scaleY = favScale.value
+                }
+        )
+    }
+}
+
+data class FolderRouteState(
+    val folderId: String,
+    val folderName: String,
+    val isSpotifyView: Boolean,
+    val files: List<DriveFile>,
+    val isLoading: Boolean,
+    val errorMessage: String?
+)
+
+data class MiniPlayerTrackSnapshot(
+    val fileId: String,
+    val title: String,
+    val artist: String,
+    val artUrl: String?,
+    val artworkData: ByteArray?
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (javaClass != other?.javaClass) return false
+        other as MiniPlayerTrackSnapshot
+        if (fileId != other.fileId) return false
+        if (title != other.title) return false
+        if (artist != other.artist) return false
+        if (artUrl != other.artUrl) return false
+        if (artworkData != null) {
+            if (other.artworkData == null) return false
+            if (!artworkData.contentEquals(other.artworkData)) return false
+        } else if (other.artworkData != null) return false
+        return true
+    }
+
+    override fun hashCode(): Int {
+        var result = fileId.hashCode()
+        result = 31 * result + title.hashCode()
+        result = 31 * result + artist.hashCode()
+        result = 31 * result + (artUrl?.hashCode() ?: 0)
+        result = 31 * result + (artworkData?.contentHashCode() ?: 0)
+        return result
+    }
+}
 
 class MainActivity : ComponentActivity() {
     @OptIn(ExperimentalMaterial3Api::class)
@@ -110,13 +265,18 @@ class MainActivity : ComponentActivity() {
             workRequest
         )
 
+        val shouldBypassSplash = savedInstanceState != null || hasShownColdBootSplash
+
         setContent {
             val viewModel: DriveViewModel = viewModel()
-            // Compose-level splash: show animated overlay for ~700ms then fade out
-            var showSplash by remember { mutableStateOf(true) }
+            // Compose-level splash: show animated overlay for cold boot then fade out
+            var showSplash by remember { mutableStateOf(!shouldBypassSplash) }
             LaunchedEffect(Unit) {
-                kotlinx.coroutines.delay(1400) // long enough for full ring pulse + text read
-                showSplash = false
+                if (showSplash) {
+                    hasShownColdBootSplash = true
+                    kotlinx.coroutines.delay(1400) // Full ripple ring cascade + logo reveal
+                    showSplash = false
+                }
             }
             val appTheme by viewModel.theme.collectAsState()
             val accentColor by viewModel.accentColor.collectAsState()
@@ -124,10 +284,14 @@ class MainActivity : ComponentActivity() {
             val searchQuery by viewModel.searchQuery.collectAsState()
             val searchState by viewModel.searchState.collectAsState()
             val currentPlayingFileId by viewModel.currentPlayingFileId.collectAsState()
+            val currentPlayingTrack by viewModel.currentPlayingTrack.collectAsState()
+            val activeTrackDurationMs by viewModel.activeTrackDurationMs.collectAsState()
             val isPlaying by viewModel.isPlaying.collectAsState()
             val sessionRole by viewModel.sessionRole.collectAsState()
             val roomId by viewModel.roomId.collectAsState()
             val playbackErrorMessage by viewModel.playbackErrorMessage.collectAsState()
+            val currentIndex by viewModel.currentIndex.collectAsState()
+            val currentPlayingFolderName by viewModel.currentPlayingFolderName.collectAsState()
             val snackbarHostState = remember { androidx.compose.material3.SnackbarHostState() }
             
             var fileToDownload by remember { mutableStateOf<DriveFile?>(null) }
@@ -159,8 +323,17 @@ class MainActivity : ComponentActivity() {
             DriveStreamTheme(appTheme = appTheme, accentColor = accentColor) {
                 val uiState by viewModel.uiState.collectAsState()
                 val activeAccount by viewModel.activeAccount.collectAsState()
+                val isInitialFolderReady by viewModel.isInitialFolderReady.collectAsState()
 
                 var isPlayerExpanded by remember { mutableStateOf(false) }
+                var sheetReleaseVelocityY by remember { mutableFloatStateOf(0f) }
+                LaunchedEffect(isPlayerExpanded) {
+                    if (isPlayerExpanded) {
+                        sheetReleaseVelocityY = 0f
+                    }
+                }
+                val exitVelocityFactor = (sheetReleaseVelocityY / 3500f).coerceIn(0f, 1f)
+                val sheetExitDurationMs = (260f - (120f * exitVelocityFactor)).toInt().coerceIn(140, 260)
                 val coroutineScope = rememberCoroutineScope()
 
                 val currentFolder by viewModel.currentFolder.collectAsState()
@@ -170,6 +343,7 @@ class MainActivity : ComponentActivity() {
                     enabled = (currentFolder.first != "root") || (uiState is DriveUiState.Success) || isPlayerExpanded
                 ) {
                     if (isPlayerExpanded) {
+                        sheetReleaseVelocityY = 0f
                         isPlayerExpanded = false
                     } else {
                         val handled = viewModel.navigateBack()
@@ -233,6 +407,7 @@ class MainActivity : ComponentActivity() {
                         onRefreshLibrary = { viewModel.refreshCurrentFolder() },
                         uiState = uiState,
                         activeAccount = activeAccount,
+                        isInitialFolderReady = isInitialFolderReady,
                         currentTheme = appTheme,
                         accentColor = accentColor,
                         sortState = sortState,
@@ -322,14 +497,32 @@ class MainActivity : ComponentActivity() {
                         } // End of MainScreen Box
 
                         // Mini Player at the bottom of the Column
-                        if (!currentPlayingFileId.isNullOrEmpty()) {
+                        AnimatedVisibility(
+                            visible = !currentPlayingFileId.isNullOrEmpty(),
+                            enter = slideInVertically(
+                                animationSpec = spring(
+                                    dampingRatio = Spring.DampingRatioLowBouncy,
+                                    stiffness = Spring.StiffnessMediumLow
+                                ),
+                                initialOffsetY = { fullHeight -> fullHeight }
+                            ) + fadeIn(animationSpec = tween(220)),
+                            exit = slideOutVertically(
+                                animationSpec = tween(200, easing = FastOutLinearInEasing),
+                                targetOffsetY = { fullHeight -> fullHeight }
+                            ) + fadeOut(animationSpec = tween(180))
+                        ) {
                             val controller by viewModel.player.collectAsState()
                             val currentSpotifyArtUrl by viewModel.currentSpotifyArtUrl.collectAsState()
                             MiniPlayer(
                                 controller = controller,
+                                fallbackDurationMs = activeTrackDurationMs,
                                 currentSpotifyArtUrl = currentSpotifyArtUrl,
                                 songThumbnails = songThumbnails,
                                 sessionRole = sessionRole,
+                                currentPlayingFileId = currentPlayingFileId,
+                                currentPlayingTrack = currentPlayingTrack,
+                                currentTrackIndex = currentIndex,
+                                currentPlaylistName = currentPlayingFolderName,
                                 onExpand = { isPlayerExpanded = true }
                             )
                         }
@@ -338,8 +531,19 @@ class MainActivity : ComponentActivity() {
                     // Full-screen player overlay at the top Z-level
                     AnimatedVisibility(
                         visible = isPlayerExpanded,
-                        enter = slideInVertically(initialOffsetY = { fullHeight -> fullHeight }) + fadeIn(),
-                        exit = slideOutVertically(targetOffsetY = { fullHeight -> fullHeight }) + fadeOut(),
+                        enter = slideInVertically(
+                            animationSpec = tween(durationMillis = 300, easing = FastOutSlowInEasing),
+                            initialOffsetY = { fullHeight -> fullHeight }
+                        ) + fadeIn(animationSpec = tween(durationMillis = 220)),
+                        exit = slideOutVertically(
+                            animationSpec = tween(durationMillis = sheetExitDurationMs, easing = FastOutLinearInEasing),
+                            targetOffsetY = { fullHeight -> fullHeight }
+                        ) + fadeOut(
+                            animationSpec = tween(
+                                durationMillis = (sheetExitDurationMs * 0.85f).toInt(),
+                                easing = FastOutLinearInEasing
+                            )
+                        ),
                         modifier = Modifier.fillMaxSize().zIndex(100f) // ensure it overlays everything
                     ) {
                         val controller by viewModel.player.collectAsState()
@@ -348,7 +552,6 @@ class MainActivity : ComponentActivity() {
                         val sleepTimerRemaining by viewModel.sleepTimerRemaining.collectAsState()
                         val sleepTimerTotal by viewModel.sleepTimerTotal.collectAsState()
                         val sleepTimerPauseAfterTrack by viewModel.sleepTimerPauseAfterTrack.collectAsState()
-                        val currentPlayingFolderName by viewModel.currentPlayingFolderName.collectAsState()
                         val queueListState = androidx.compose.foundation.lazy.rememberLazyListState()
 
                         Box(
@@ -356,6 +559,7 @@ class MainActivity : ComponentActivity() {
                         ) {
                             PlaybackBottomSheet(
                                 controller = controller,
+                                fallbackDurationMs = activeTrackDurationMs,
                                 upcomingQueue = upcomingQueue,
                                 currentSpotifyArtUrl = currentSpotifyArtUrl,
                                 songThumbnails = songThumbnails,
@@ -371,7 +575,10 @@ class MainActivity : ComponentActivity() {
                                 onNeedsTokenRefresh = { viewModel.refreshAuthTokenAndRetry() },
                                 onClearQueue = { viewModel.clearQueue() },
                                 onPlayQueueItem = { file -> viewModel.playAudio(file, fromQueue = true) },
-                                onCollapse = { isPlayerExpanded = false },
+                                onCollapse = { releaseVelocityY ->
+                                    sheetReleaseVelocityY = releaseVelocityY
+                                    isPlayerExpanded = false
+                                },
                                 onSetSleepTimer = { mins -> viewModel.setSleepTimer(mins) },
                                 onCancelSleepTimer = { viewModel.cancelSleepTimer() },
                                 onSetSleepTimerBehavior = { b -> viewModel.setSleepTimerBehavior(b) },
@@ -396,9 +603,24 @@ class MainActivity : ComponentActivity() {
             AnimatedVisibility(
                 visible = showSplash,
                 enter = EnterTransition.None,
-                exit = fadeOut(animationSpec = tween(600, easing = FastOutSlowInEasing))
+                exit = fadeOut(animationSpec = tween(600, easing = FastOutSlowInEasing)),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .zIndex(999f)
             ) {
-                SplashScreenContent()
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .pointerInput(Unit) {
+                            awaitPointerEventScope {
+                                while (true) {
+                                    awaitPointerEvent().changes.forEach { it.consume() }
+                                }
+                            }
+                        }
+                ) {
+                    SplashScreenContent()
+                }
             }
         } // End of setContent
     } // End of onCreate
@@ -428,10 +650,11 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         private const val SIGN_IN_REQUEST_CODE = 1001
+        private var hasShownColdBootSplash = false
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun MainScreen(
     modifier: Modifier = Modifier,
@@ -450,6 +673,7 @@ fun MainScreen(
     onRefreshLibrary: () -> Unit = {},
     uiState: DriveUiState,
     activeAccount: com.google.android.gms.auth.api.signin.GoogleSignInAccount?,
+    isInitialFolderReady: Boolean = true,
     currentTheme: AppTheme,
     accentColor: AccentColor,
     sortState: SortState,
@@ -498,364 +722,452 @@ fun MainScreen(
     onRetryThumbnails: () -> Unit = {}
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
-    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
-    TrackScrollStateForFling(listState)
-    val filesForPreload = when {
-        searchQuery.length >= 2 && searchState is SearchState.Results -> searchState.files
-        uiState is DriveUiState.Success -> uiState.files
-        else -> emptyList()
-    }
-    ThumbnailLookaheadPreloader(listState = listState, items = filesForPreload, lookaheadCount = 5)
+    val isUserSignedIn = activeAccount != null || GoogleSignIn.getLastSignedInAccount(context) != null
     val musicNotePainter = androidx.compose.ui.graphics.vector.rememberVectorPainter(Icons.Default.MusicNote)
 
-    // After sorting, scroll to the top of the newly sorted list.
-    LaunchedEffect(sortState) {
-        listState.scrollToItem(0)
-    }
     var showSortMenu by remember { mutableStateOf(false) }
     var showAccountSheet by remember { mutableStateOf(false) }
+    var showEqualizerSheet by remember { mutableStateOf(false) }
     var showMusicFolderPromptManual by remember { mutableStateOf(false) }
 
-    val currentSuccessFiles = (uiState as? DriveUiState.Success)?.files ?: emptyList()
-    val hasMusicFilesInCurrentFolder = remember(currentSuccessFiles) {
-        currentSuccessFiles.any { !it.isFolder }
-    }
-
-    var lastFolderWithMusicId by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(currentFolder.first, uiState) {
-        if (uiState is DriveUiState.Success) {
-            if (hasMusicFilesInCurrentFolder) {
-                lastFolderWithMusicId = currentFolder.first
-            } else if (lastFolderWithMusicId == currentFolder.first) {
-                lastFolderWithMusicId = null
-            }
-        }
-    }
-
-    val isPlaylistFolder = hasMusicFilesInCurrentFolder || (uiState is DriveUiState.Loading && currentFolder.first == lastFolderWithMusicId)
-    val showSpotifyPlaylistView = uiState !is DriveUiState.Idle &&
-        currentFolder.first != "root" &&
-        searchQuery.length < 2 &&
-        isPlaylistFolder
-
-    if (showSpotifyPlaylistView) {
-        SpotifyFolderView(
-            folderId = currentFolder.first,
-            folderName = currentFolder.second,
-            files = if (uiState is DriveUiState.Success) uiState.files else emptyList(),
-            songThumbnails = songThumbnails,
-            currentPlayingFileId = currentPlayingFileId,
-            isPlaying = isPlaying,
-            isShuffleEnabled = isShuffleEnabled,
-            onToggleShuffle = onToggleShuffle,
-            activeAccount = activeAccount,
-            onBackClick = onBackClick,
-            onFolderClick = onFolderClick,
-            onFileClick = onFileClick,
-            onPlayFolderClick = onPlayFolderClick,
-            onAddToQueue = onAddToQueue,
-            onDownload = onDownload,
-            onShareTrack = onShareTrack,
-            onToggleFavourite = onToggleFavourite,
-            favourites = favourites,
-            onOpenSortMenu = { showSortMenu = true },
-            onRetryThumbnails = onRetryThumbnails,
-            isLoading = uiState is DriveUiState.Loading,
-            player = player,
-            modifier = modifier
-        )
-    } else {
-        Scaffold(
-            modifier = modifier,
-        topBar = {
-            Column {
-                TopAppBar(
-                    title = {
-                        Text(
-                            text = if (currentFolder.first == "root") "Drive Library" else currentFolder.second,
-                            fontWeight = FontWeight.Bold
-                        )
-                    },
-                    navigationIcon = {
-                        if (currentFolder.first != "root") {
-                            IconButton(onClick = onBackClick) {
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                                    contentDescription = "Back"
-                                )
-                            }
-                        }
-                    },
-                actions = {
-                    if (uiState !is DriveUiState.Idle) {
-                        Box {
-                            IconButton(onClick = { showSortMenu = true }) {
-                                Icon(Icons.Default.Sort, contentDescription = "Sort")
-                            }
-                        }
-                        IconButton(onClick = onOpenFavourites) {
-                            Icon(Icons.Default.FavoriteBorder, contentDescription = "Favourites")
-                        }
-                        IconButton(onClick = { showAccountSheet = true }) {
-                            if (activeAccount?.photoUrl != null) {
-                                coil.compose.AsyncImage(
-                                    model = activeAccount.photoUrl,
-                                    contentDescription = "Profile Picture",
-                                    modifier = Modifier.size(32.dp).clip(CircleShape)
-                                )
-                            } else {
-                                Icon(Icons.Default.AccountCircle, contentDescription = "Account")
-                            }
-                        }
-                    }
-                }
-                )
-                // Search bar below TopAppBar, visible when signed in
-                if (uiState !is DriveUiState.Idle) {
-                    OutlinedTextField(
-                        value = searchQuery,
-                        onValueChange = onSearchQueryChanged,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 4.dp),
-                        placeholder = { Text("Search all audio files…") },
-                        leadingIcon = { Icon(Icons.Default.Search, contentDescription = "Search") },
-                        trailingIcon = {
-                            if (searchQuery.isNotEmpty()) {
-                                IconButton(onClick = onClearSearch) {
-                                    Icon(Icons.Default.Close, contentDescription = "Clear search")
-                                }
-                            }
-                        },
-                        singleLine = true,
-                        shape = RoundedCornerShape(28.dp)
-                    )
-                }
-                if (isShareLoading) {
-                    androidx.compose.material3.LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                }
-            } // end Column
-        },
-        floatingActionButton = {
-            if (uiState is DriveUiState.Success && uiState.files.any { !it.isFolder }) {
-                ExtendedFloatingActionButton(
-                    onClick = onPlayAllClick,
-                    icon = { Icon(Icons.Default.PlayArrow, contentDescription = "Play All") },
-                    text = { Text("Play All") },
-                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer
-                )
-            }
-        }
-    ) { paddingValues ->
-        if (uiState is DriveUiState.Idle) {
-            // ── LANDING / SIGN-IN SCREEN ─────────────────────────────────────
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(paddingValues),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center,
-                    modifier = Modifier.padding(horizontal = 40.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(140.dp)
-                            .clip(RoundedCornerShape(36.dp))
-                            .background(Color(0xFF1E1E1E)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        androidx.compose.foundation.Image(
-                            painter = androidx.compose.ui.res.painterResource(id = R.drawable.ic_launcher_foreground),
-                            contentDescription = "DriveStream Logo",
-                            modifier = Modifier.fillMaxSize(1.8f),
-                            contentScale = androidx.compose.ui.layout.ContentScale.Fit
-                        )
-                    }
-                    Spacer(modifier = Modifier.height(32.dp))
-                    Text(
-                        text = "DriveStream",
-                        style = MaterialTheme.typography.headlineLarge,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = MaterialTheme.colorScheme.onBackground
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "Stream music directly from your Google Drive",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                    )
-                    Spacer(modifier = Modifier.height(48.dp))
-                    Button(
-                        onClick = onSignInClick,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(56.dp),
-                        shape = RoundedCornerShape(16.dp)
-                    ) {
-                        Icon(Icons.Default.CloudDownload, contentDescription = null)
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Text(
-                            "Connect Google Drive",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-            }
+    val currentFiles = (uiState as? DriveUiState.Success)?.files ?: emptyList()
+    val knownPlaylistFolders = remember { mutableStateMapOf<String, Boolean>() }
+    val isSpotifyPlaylistView = remember(currentFolder.first, uiState, searchQuery) {
+        if (uiState is DriveUiState.Idle || currentFolder.first == "root" || searchQuery.length >= 2) {
+            false
+        } else if (uiState is DriveUiState.Success) {
+            val hasSongs = currentFiles.any { !it.isFolder }
+            knownPlaylistFolders[currentFolder.first] = hasSongs
+            hasSongs
         } else {
-        LazyColumn(
-            state = listState,
-            modifier = Modifier.fillMaxSize().padding(paddingValues),
-            contentPadding = WindowInsets.systemBars.only(WindowInsetsSides.Horizontal).asPaddingValues()
-        ) {
-            if (searchQuery.length >= 2) {
-                // --- SEARCH MODE ---
-                when (searchState) {
-                    is SearchState.Loading -> {
-                        items(10) {
-                            SkeletonFileRow()
-                        }
-                    }
-                    is SearchState.Results -> {
-                        if (searchState.files.isEmpty()) {
-                            item {
-                                Text(
-                                    "No audio files found for \"$searchQuery\".",
-                                    modifier = Modifier.padding(16.dp),
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        } else {
-                            item {
-                                Text(
-                                    "${searchState.files.size} result${if (searchState.files.size == 1) "" else "s"}",
-                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            items(
-                                items = searchState.files, 
-                                key = { if (it.fileId.isNotEmpty()) it.fileId else it.hashCode() },
-                                contentType = { if (it.isFolder) 0 else 1 }
-                            ) { file ->
-                                val clickHandler = remember(file.fileId) { { onFileClick(file) } }
-                                SongListItem(
-                                    file = file,
-                                    isCurrentlyPlaying = file.fileId == currentPlayingFileId,
-                                    isPlaying = isPlaying,
-                                    isFavourite = favourites.any { it.fileId == file.fileId },
-                                    onToggleFavourite = { onToggleFavourite(file) },
-                                    onClick = clickHandler,
-                                    onPlayFolderClick = {},
-                                    onAddToQueue = { onAddToQueue(file) },
-                                    onDownload = { onDownload(file) },
-                                    onShare = { onShareTrack(file) },
-                                    thumbnailUrl = file.thumbnailUrl ?: songThumbnails[file.fileId] ?: file.albumArtUrl,
-                                    musicNotePainter = musicNotePainter
-                                )
-                            }
-                        }
-                    }
-                    is SearchState.Error -> {
-                        item {
-                            Text(
-                                text = "Search error: ${searchState.message}",
-                                color = MaterialTheme.colorScheme.error,
-                                modifier = Modifier.padding(16.dp)
-                            )
-                        }
-                    }
-                    is SearchState.Idle -> { /* query too short — handled above */ }
-                }
-            } else {
-                // --- NORMAL BROWSE MODE ---
-                when (uiState) {
-                    is DriveUiState.Idle -> {
-                        item {
-                            Text(
-                                "Sign in to fetch audio files from Google Drive.",
-                                modifier = Modifier.padding(16.dp),
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                    is DriveUiState.Loading -> {
-                        items(10) {
-                            SkeletonFileRow()
-                        }
-                    }
-                    is DriveUiState.Error -> {
-                        item {
-                            Text(
-                                text = uiState.message,
-                                color = MaterialTheme.colorScheme.error,
-                                modifier = Modifier.padding(16.dp)
-                            )
-                        }
-                    }
+            knownPlaylistFolders[currentFolder.first] == true
+        }
+    }
 
-                    is DriveUiState.Success -> {
-                        if (uiState.files.isEmpty()) {
-                            item {
+    val currentRouteState = FolderRouteState(
+        folderId = currentFolder.first,
+        folderName = currentFolder.second,
+        isSpotifyView = isSpotifyPlaylistView,
+        files = currentFiles,
+        isLoading = uiState is DriveUiState.Loading,
+        errorMessage = (uiState as? DriveUiState.Error)?.message
+    )
+
+    val navStackHistory = remember { mutableStateListOf<String>() }
+    val isNavigatingBack = remember(currentFolder.first) {
+        val existingIndex = navStackHistory.indexOf(currentFolder.first)
+        if (existingIndex != -1 && existingIndex < navStackHistory.lastIndex) {
+            while (navStackHistory.size > existingIndex + 1) {
+                navStackHistory.removeAt(navStackHistory.lastIndex)
+            }
+            true
+        } else {
+            if (navStackHistory.lastOrNull() != currentFolder.first) {
+                navStackHistory.add(currentFolder.first)
+            }
+            false
+        }
+    }
+
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+    ) {
+        AnimatedContent(
+            targetState = currentRouteState,
+            contentKey = { "${it.folderId}_${it.isSpotifyView}" },
+            transitionSpec = {
+                if (initialState.folderId == targetState.folderId) {
+                    // Same folder switching between loading/playlist view: smooth cross-dissolve
+                    fadeIn(
+                        animationSpec = tween(durationMillis = 220, easing = LinearOutSlowInEasing)
+                    ) togetherWith fadeOut(
+                        animationSpec = tween(durationMillis = 160, easing = FastOutLinearInEasing)
+                    )
+                } else if (isNavigatingBack) {
+                    // Navigating BACK: current screen fades out & slides right + scales down slightly,
+                    // then previous screen fades in & glides from the left
+                    val enter = slideInHorizontally(
+                        animationSpec = tween(durationMillis = 300, easing = FastOutSlowInEasing),
+                        initialOffsetX = { fullWidth -> -(fullWidth * 0.16f).toInt() }
+                    ) + fadeIn(
+                        animationSpec = tween(
+                            durationMillis = 240,
+                            delayMillis = 70,
+                            easing = LinearOutSlowInEasing
+                        )
+                    )
+                    val exit = slideOutHorizontally(
+                        animationSpec = tween(durationMillis = 220, easing = FastOutLinearInEasing),
+                        targetOffsetX = { fullWidth -> (fullWidth * 0.18f).toInt() }
+                    ) + fadeOut(
+                        animationSpec = tween(durationMillis = 180, easing = FastOutLinearInEasing)
+                    ) + scaleOut(
+                        targetScale = 0.96f,
+                        animationSpec = tween(durationMillis = 200, easing = FastOutLinearInEasing)
+                    )
+                    enter togetherWith exit
+                } else {
+                    // Navigating FORWARD: current screen fades out & slides left + scales down slightly,
+                    // then new screen fades in & glides from the right
+                    val enter = slideInHorizontally(
+                        animationSpec = tween(durationMillis = 300, easing = FastOutSlowInEasing),
+                        initialOffsetX = { fullWidth -> (fullWidth * 0.16f).toInt() }
+                    ) + fadeIn(
+                        animationSpec = tween(
+                            durationMillis = 240,
+                            delayMillis = 70,
+                            easing = LinearOutSlowInEasing
+                        )
+                    )
+                    val exit = slideOutHorizontally(
+                        animationSpec = tween(durationMillis = 220, easing = FastOutLinearInEasing),
+                        targetOffsetX = { fullWidth -> -(fullWidth * 0.18f).toInt() }
+                    ) + fadeOut(
+                        animationSpec = tween(durationMillis = 180, easing = FastOutLinearInEasing)
+                    ) + scaleOut(
+                        targetScale = 0.96f,
+                        animationSpec = tween(durationMillis = 200, easing = FastOutLinearInEasing)
+                    )
+                    enter togetherWith exit
+                }
+            },
+            label = "folder_page_transition"
+        ) { page ->
+        if (page.isSpotifyView) {
+            SpotifyFolderView(
+                folderId = page.folderId,
+                folderName = page.folderName,
+                files = page.files,
+                songThumbnails = songThumbnails,
+                currentPlayingFileId = currentPlayingFileId,
+                isPlaying = isPlaying,
+                isShuffleEnabled = isShuffleEnabled,
+                onToggleShuffle = onToggleShuffle,
+                activeAccount = activeAccount,
+                onBackClick = onBackClick,
+                onFolderClick = onFolderClick,
+                onFileClick = onFileClick,
+                onPlayFolderClick = onPlayFolderClick,
+                onAddToQueue = onAddToQueue,
+                onDownload = onDownload,
+                onShareTrack = onShareTrack,
+                onToggleFavourite = onToggleFavourite,
+                favourites = favourites,
+                onOpenSortMenu = { showSortMenu = true },
+                onRetryThumbnails = onRetryThumbnails,
+                isLoading = page.isLoading,
+                player = player,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            val pageListState = remember(page.folderId) { androidx.compose.foundation.lazy.LazyListState() }
+            TrackScrollStateForFling(pageListState)
+            val filesForPreload = when {
+                searchQuery.length >= 2 && searchState is SearchState.Results -> searchState.files
+                else -> page.files
+            }
+            ThumbnailLookaheadPreloader(listState = pageListState, items = filesForPreload, lookaheadCount = 5)
+
+            // After sorting, scroll to the top of the newly sorted list.
+            LaunchedEffect(sortState) {
+                pageListState.scrollToItem(0)
+            }
+
+            Scaffold(
+                modifier = Modifier.fillMaxSize(),
+                topBar = {
+                    Column {
+                        TopAppBar(
+                            title = {
                                 Text(
-                                    "No audio files found in the specified folder.",
-                                    modifier = Modifier.padding(16.dp),
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    text = if (!isInitialFolderReady) "" else if (page.folderId == "root") "Drive Library" else page.folderName,
+                                    fontWeight = FontWeight.Bold
                                 )
-                            }
-                        } else {
-                            items(
-                                items = uiState.files,
-                                key = { if (it.fileId.isNotEmpty()) it.fileId else it.hashCode() },
-                                contentType = { if (it.isFolder) 0 else 1 }
-                            ) { file ->
-                                val clickHandler = remember(file.fileId) {
-                                    {
-                                        if (file.isFolder) onFolderClick(file.fileId, file.name)
-                                        else onFileClick(file)
+                            },
+                            navigationIcon = {
+                                if (page.folderId != "root") {
+                                    IconButton(onClick = onBackClick) {
+                                        Icon(
+                                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                            contentDescription = "Back"
+                                        )
                                     }
                                 }
-                                val playFolderHandler = remember(file.fileId) {
-                                    {
-                                        onPlayFolderClick(file.fileId) {
-                                            android.widget.Toast.makeText(context, "No audio files found in this folder.", android.widget.Toast.LENGTH_SHORT).show()
+                            },
+                            actions = {
+                                if (uiState !is DriveUiState.Idle) {
+                                    Box {
+                                        IconButton(onClick = { showSortMenu = true }) {
+                                            Icon(Icons.Default.Sort, contentDescription = "Sort")
+                                        }
+                                    }
+                                    IconButton(onClick = onOpenFavourites) {
+                                        Icon(Icons.Default.FavoriteBorder, contentDescription = "Favourites")
+                                    }
+                                    IconButton(onClick = { showAccountSheet = true }) {
+                                        if (activeAccount?.photoUrl != null) {
+                                            coil.compose.AsyncImage(
+                                                model = activeAccount.photoUrl,
+                                                contentDescription = "Profile Picture",
+                                                modifier = Modifier.size(32.dp).clip(CircleShape)
+                                            )
+                                        } else {
+                                            Icon(Icons.Default.AccountCircle, contentDescription = "Account")
                                         }
                                     }
                                 }
-                                SongListItem(
-                                    file = file,
-                                    isCurrentlyPlaying = file.fileId == currentPlayingFileId,
-                                    isPlaying = isPlaying,
-                                    isFavourite = favourites.any { it.fileId == file.fileId },
-                                    onToggleFavourite = { onToggleFavourite(file) },
-                                    onClick = clickHandler,
-                                    onPlayFolderClick = playFolderHandler,
-                                    onAddToQueue = { onAddToQueue(file) },
-                                    onDownload = { onDownload(file) },
-                                    onShare = { onShareTrack(file) },
-                                    thumbnailUrl = file.thumbnailUrl ?: songThumbnails[file.fileId] ?: file.albumArtUrl,
-                                    musicNotePainter = musicNotePainter
+                            }
+                        )
+                        // Search bar below TopAppBar, visible when signed in
+                        if (uiState !is DriveUiState.Idle) {
+                            OutlinedTextField(
+                                value = searchQuery,
+                                onValueChange = onSearchQueryChanged,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                                placeholder = { Text("Search all audio files…") },
+                                leadingIcon = { Icon(Icons.Default.Search, contentDescription = "Search") },
+                                trailingIcon = {
+                                    if (searchQuery.isNotEmpty()) {
+                                        IconButton(onClick = onClearSearch) {
+                                            Icon(Icons.Default.Close, contentDescription = "Clear search")
+                                        }
+                                    }
+                                },
+                                singleLine = true,
+                                shape = RoundedCornerShape(28.dp)
+                            )
+                        }
+                        if (isShareLoading) {
+                            androidx.compose.material3.LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        }
+                    } // end Column
+                },
+                floatingActionButton = {
+                    val showFab = if (searchQuery.length >= 2) {
+                        (searchState as? SearchState.Results)?.files?.any { !it.isFolder } == true
+                    } else {
+                        page.files.any { !it.isFolder }
+                    }
+                    AnimatedVisibility(
+                        visible = showFab,
+                        enter = scaleIn(spring(dampingRatio = Spring.DampingRatioLowBouncy)) + fadeIn(),
+                        exit = scaleOut() + fadeOut()
+                    ) {
+                        ExtendedFloatingActionButton(
+                            onClick = onPlayAllClick,
+                            modifier = Modifier.bounceClick(scaleDown = 0.95f, onClick = onPlayAllClick),
+                            icon = { Icon(Icons.Default.PlayArrow, contentDescription = "Play All") },
+                            text = { Text("Play All") },
+                            containerColor = MaterialTheme.colorScheme.primaryContainer,
+                            contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                    }
+                }
+            ) { paddingValues ->
+                if (!isUserSignedIn) {
+                    // ── LANDING / SIGN-IN SCREEN ─────────────────────────────────────
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(paddingValues),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center,
+                            modifier = Modifier.padding(horizontal = 40.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(140.dp)
+                                    .clip(RoundedCornerShape(36.dp))
+                                    .background(Color(0xFF1E1E1E)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                androidx.compose.foundation.Image(
+                                    painter = androidx.compose.ui.res.painterResource(id = R.drawable.ic_launcher_foreground),
+                                    contentDescription = "DriveStream Logo",
+                                    modifier = Modifier.fillMaxSize(1.8f),
+                                    contentScale = androidx.compose.ui.layout.ContentScale.Fit
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(32.dp))
+                            Text(
+                                text = "DriveStream",
+                                style = MaterialTheme.typography.headlineLarge,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = MaterialTheme.colorScheme.onBackground
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "Stream music directly from your Google Drive",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            )
+                            Spacer(modifier = Modifier.height(48.dp))
+                            Button(
+                                onClick = onSignInClick,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(56.dp),
+                                shape = RoundedCornerShape(16.dp)
+                            ) {
+                                Icon(Icons.Default.CloudDownload, contentDescription = null)
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Text(
+                                    "Connect Google Drive",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold
                                 )
                             }
                         }
                     }
-                }
-            }
+                } else {
+                    LazyColumn(
+                        state = pageListState,
+                        modifier = Modifier.fillMaxSize().padding(paddingValues),
+                        contentPadding = WindowInsets.systemBars.only(WindowInsetsSides.Horizontal).asPaddingValues()
+                    ) {
+                        if (searchQuery.length >= 2) {
+                            // --- SEARCH MODE ---
+                            when (searchState) {
+                                is SearchState.Loading -> {
+                                    items(10) {
+                                        SkeletonFileRow()
+                                    }
+                                }
+                                is SearchState.Results -> {
+                                    if (searchState.files.isEmpty()) {
+                                        item {
+                                            Text(
+                                                "No audio files found for \"$searchQuery\".",
+                                                modifier = Modifier.padding(16.dp),
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    } else {
+                                        item {
+                                            Text(
+                                                "${searchState.files.size} result${if (searchState.files.size == 1) "" else "s"}",
+                                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                                                style = MaterialTheme.typography.labelMedium,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                        items(
+                                            items = searchState.files, 
+                                            key = { if (it.fileId.isNotEmpty()) it.fileId else it.hashCode() },
+                                            contentType = { if (it.isFolder) 0 else 1 }
+                                        ) { file ->
+                                            val clickHandler = remember(file.fileId) { { onFileClick(file) } }
+                                            SongListItem(
+                                                file = file,
+                                                isCurrentlyPlaying = file.fileId == currentPlayingFileId,
+                                                isPlaying = isPlaying,
+                                                isFavourite = favourites.any { it.fileId == file.fileId },
+                                                onToggleFavourite = { onToggleFavourite(file) },
+                                                onClick = clickHandler,
+                                                onPlayFolderClick = {},
+                                                onAddToQueue = { onAddToQueue(file) },
+                                                onDownload = { onDownload(file) },
+                                                onShare = { onShareTrack(file) },
+                                                thumbnailUrl = file.thumbnailUrl ?: songThumbnails[file.fileId] ?: file.albumArtUrl,
+                                                musicNotePainter = musicNotePainter,
+                                                modifier = Modifier.animateItemPlacement(tween(240, easing = FastOutSlowInEasing))
+                                            )
+                                        }
+                                    }
+                                }
+                                is SearchState.Error -> {
+                                    item {
+                                        Text(
+                                            text = "Search error: ${searchState.message}",
+                                            color = MaterialTheme.colorScheme.error,
+                                            modifier = Modifier.padding(16.dp)
+                                        )
+                                    }
+                                }
+                                is SearchState.Idle -> { /* query too short — handled above */ }
+                            }
+                        } else {
+                            // --- NORMAL BROWSE MODE ---
+                            when {
+                                page.isLoading -> {
+                                    items(10) {
+                                        SkeletonFileRow()
+                                    }
+                                }
+                                page.errorMessage != null -> {
+                                    item {
+                                        Text(
+                                            text = page.errorMessage,
+                                            color = MaterialTheme.colorScheme.error,
+                                            modifier = Modifier.padding(16.dp)
+                                        )
+                                    }
+                                }
+                                page.files.isEmpty() -> {
+                                    item {
+                                        Text(
+                                            "No audio files found in the specified folder.",
+                                            modifier = Modifier.padding(16.dp),
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                                else -> {
+                                    items(
+                                        items = page.files,
+                                        key = { if (it.fileId.isNotEmpty()) it.fileId else it.hashCode() },
+                                        contentType = { if (it.isFolder) 0 else 1 }
+                                    ) { file ->
+                                        val clickHandler = remember(file.fileId) {
+                                            {
+                                                if (file.isFolder) onFolderClick(file.fileId, file.name)
+                                                else onFileClick(file)
+                                            }
+                                        }
+                                        val playFolderHandler = remember(file.fileId) {
+                                            {
+                                                onPlayFolderClick(file.fileId) {
+                                                    android.widget.Toast.makeText(context, "No audio files found in this folder.", android.widget.Toast.LENGTH_SHORT).show()
+                                                }
+                                            }
+                                        }
+                                        SongListItem(
+                                            file = file,
+                                            isCurrentlyPlaying = file.fileId == currentPlayingFileId,
+                                            isPlaying = isPlaying,
+                                            isFavourite = favourites.any { it.fileId == file.fileId },
+                                            onToggleFavourite = { onToggleFavourite(file) },
+                                            onClick = clickHandler,
+                                            onPlayFolderClick = playFolderHandler,
+                                            onAddToQueue = { onAddToQueue(file) },
+                                            onDownload = { onDownload(file) },
+                                            onShare = { onShareTrack(file) },
+                                            thumbnailUrl = file.thumbnailUrl ?: songThumbnails[file.fileId] ?: file.albumArtUrl,
+                                            musicNotePainter = musicNotePainter,
+                                            modifier = Modifier.animateItemPlacement(tween(240, easing = FastOutSlowInEasing))
+                                        )
+                                    }
+                                }
+                            }
+                        }
 
-
-            item {
-                Spacer(modifier = Modifier.height(130.dp)) // Padding to ensure last item is above bottom sheet
-            }
-        }
-        } // end else (signed in)
-    } // end Scaffold
-    } // end else (root view)
+                        item {
+                            Spacer(modifier = Modifier.height(130.dp)) // Padding to ensure last item is above bottom sheet
+                        }
+                    }
+                } // end else (signed in)
+            } // end Scaffold
+        } // end else (Scaffold branch)
+    } // end AnimatedContent
+    } // end Box
 
     val sortSheetState = rememberModalBottomSheetState()
     val sortScope = rememberCoroutineScope()
@@ -952,8 +1264,27 @@ fun MainScreen(
     }
 
     if (showAccountSheet) {
-        ModalBottomSheet(onDismissRequest = { showAccountSheet = false }) {
-            Column(modifier = Modifier.fillMaxWidth()) {
+        val accountSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        val accountSheetScope = rememberCoroutineScope()
+        val dismissAccountSheet: (afterDismiss: () -> Unit) -> Unit = { afterDismiss ->
+            accountSheetScope.launch {
+                accountSheetState.hide()
+            }.invokeOnCompletion {
+                showAccountSheet = false
+                afterDismiss()
+            }
+        }
+
+        ModalBottomSheet(
+            onDismissRequest = { showAccountSheet = false },
+            sheetState = accountSheetState,
+            dragHandle = { BottomSheetDefaults.DragHandle() }
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+            ) {
                 Row(
                     modifier = Modifier.padding(16.dp),
                     verticalAlignment = Alignment.CenterVertically
@@ -1025,16 +1356,55 @@ fun MainScreen(
                     )
                     
                     colors.forEach { (enumVal, displayColor) ->
+                        val isSelected = accentColor == enumVal
+                        val swatchScale by animateFloatAsState(
+                            targetValue = if (isSelected) 1.15f else 1.0f,
+                            animationSpec = spring(
+                                dampingRatio = Spring.DampingRatioMediumBouncy,
+                                stiffness = Spring.StiffnessMedium
+                            ),
+                            label = "swatch_scale_${enumVal.name}"
+                        )
+                        val borderAlpha by animateFloatAsState(
+                            targetValue = if (isSelected) 1f else 0f,
+                            animationSpec = tween(220),
+                            label = "swatch_border_${enumVal.name}"
+                        )
+
                         Box(
                             modifier = Modifier
-                                .size(40.dp)
+                                .size(42.dp)
+                                .graphicsLayer {
+                                    scaleX = swatchScale
+                                    scaleY = swatchScale
+                                }
                                 .clip(CircleShape)
                                 .background(displayColor)
+                                .border(
+                                    width = 2.5.dp,
+                                    color = Color.White.copy(alpha = borderAlpha),
+                                    shape = CircleShape
+                                )
                                 .clickable { onAccentColorSelected(enumVal) },
                             contentAlignment = Alignment.Center
                         ) {
-                            if (accentColor == enumVal) {
-                                Icon(Icons.Default.Check, contentDescription = "Selected", tint = Color.White)
+                            androidx.compose.animation.AnimatedVisibility(
+                                visible = isSelected,
+                                enter = scaleIn(
+                                    initialScale = 0.5f,
+                                    animationSpec = spring(
+                                        dampingRatio = Spring.DampingRatioLowBouncy,
+                                        stiffness = Spring.StiffnessMedium
+                                    )
+                                ) + fadeIn(animationSpec = tween(160)),
+                                exit = scaleOut(targetScale = 0.5f, animationSpec = tween(120)) +
+                                    fadeOut(animationSpec = tween(120))
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Check,
+                                    contentDescription = "Selected",
+                                    tint = if (enumVal == AccentColor.GREEN) Color.Black else Color.White
+                                )
                             }
                         }
                     }
@@ -1055,31 +1425,12 @@ fun MainScreen(
 
                 HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
                 
-                var showEqualizerDialog by remember { mutableStateOf(false) }
-                
                 ListItem(
                     headlineContent = { Text("10-Band Equalizer") },
                     supportingContent = { Text("Fine-tune your audio frequencies.") },
                     leadingContent = { Icon(Icons.Default.Settings, contentDescription = null) },
-                    modifier = Modifier.clickable { showEqualizerDialog = true }
+                    modifier = Modifier.clickable { dismissAccountSheet { showEqualizerSheet = true } }
                 )
-                
-                if (showEqualizerDialog) {
-                    EqualizerView(
-                        bands = eqBands,
-                        range = eqRange,
-                        settings = eqSettings,
-                        presets = eqPresets,
-                        error = eqError,
-                        enabled = eqEnabled,
-                        presetName = eqPresetName,
-                        onToggleEnabled = onToggleEqualizer,
-                        onBandLevelChange = onSetEqBandLevel,
-                        onUsePreset = onUseEqPreset,
-                        onReset = onResetEqualizer,
-                        onDismiss = { showEqualizerDialog = false }
-                    )
-                }
 
                 HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
 
@@ -1108,8 +1459,9 @@ fun MainScreen(
                         }
                     },
                     modifier = Modifier.clickable {
-                        showAccountSheet = false
-                        showMusicFolderPromptManual = true
+                        dismissAccountSheet {
+                            showMusicFolderPromptManual = true
+                        }
                     }
                 )
 
@@ -1139,63 +1491,17 @@ fun MainScreen(
                     headlineContent = { Text("Sign out") },
                     leadingContent = { Icon(Icons.AutoMirrored.Filled.ExitToApp, contentDescription = "Sign out") },
                     modifier = Modifier.clickable {
-                        showAccountSheet = false
-                        onSignOutClick()
+                        dismissAccountSheet {
+                            onSignOutClick()
+                        }
                     }
                 )
                 HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
 
-                // ── JAM SESSION ────────────────────────────────────────────
                 var showHostDialog by remember { mutableStateOf(false) }
                 var showJoinDialog by remember { mutableStateOf(false) }
                 var joinRoomInput by remember { mutableStateOf("") }
                 var generatedRoomId by remember { mutableStateOf("") }
-
-                /*
-                if (sessionRole == SessionRole.NONE) {
-                    ListItem(
-                        headlineContent = { Text("Host Jam Session") },
-                        supportingContent = { Text("Let others listen with you") },
-                        leadingContent = { Icon(Icons.Default.AudioFile, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
-                        modifier = Modifier.clickable {
-                            generatedRoomId = onHostSession()
-                            showHostDialog = true
-                        }
-                    )
-                    ListItem(
-                        headlineContent = { Text("Join Session") },
-                        supportingContent = { Text("Listen along with a friend") },
-                        leadingContent = { Icon(Icons.Default.Search, contentDescription = null) },
-                        modifier = Modifier.clickable { showJoinDialog = true }
-                    )
-                } else {
-                    ListItem(
-                        headlineContent = {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(if (sessionRole == SessionRole.HOST) "Hosting Session" else "In Session")
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Surface(
-                                    color = MaterialTheme.colorScheme.primaryContainer,
-                                    shape = RoundedCornerShape(4.dp)
-                                ) {
-                                    Text(
-                                        text = roomId ?: "",
-                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                                        style = MaterialTheme.typography.labelMedium,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.onPrimaryContainer
-                                    )
-                                }
-                            }
-                        },
-                        leadingContent = { Icon(Icons.Default.Close, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
-                        modifier = Modifier.clickable {
-                            onLeaveSession()
-                            showAccountSheet = false
-                        }
-                    )
-                }
-                */
 
                 // Host code dialog
                 if (showHostDialog) {
@@ -1258,6 +1564,23 @@ fun MainScreen(
         }
     }
 
+    if (showEqualizerSheet) {
+        EqualizerView(
+            bands = eqBands,
+            range = eqRange,
+            settings = eqSettings,
+            presets = eqPresets,
+            error = eqError,
+            enabled = eqEnabled,
+            presetName = eqPresetName,
+            onToggleEnabled = onToggleEqualizer,
+            onBandLevelChange = onSetEqBandLevel,
+            onUsePreset = onUseEqPreset,
+            onReset = onResetEqualizer,
+            onDismiss = { showEqualizerSheet = false }
+        )
+    }
+
     val shouldShowMusicPrompt = (!musicFolderPromptShown && currentFolder.first == "root" && uiState is DriveUiState.Success) || showMusicFolderPromptManual
     if (shouldShowMusicPrompt) {
         MusicFolderSetupPrompt(
@@ -1298,35 +1621,101 @@ fun EqualizerView(
     onReset: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    AlertDialog(
+    val eqSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val eqSheetScope = rememberCoroutineScope()
+    val dismissEqSheet: () -> Unit = {
+        eqSheetScope.launch {
+            eqSheetState.hide()
+        }.invokeOnCompletion {
+            onDismiss()
+        }
+    }
+
+    ModalBottomSheet(
         onDismissRequest = onDismiss,
-        title = {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text("10-Band Equalizer", style = MaterialTheme.typography.titleLarge)
+        sheetState = eqSheetState,
+        dragHandle = { BottomSheetDefaults.DragHandle() }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "10-Band Equalizer",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = if (enabled) "Preset: $presetName" else "Disabled",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Switch(checked = enabled, onCheckedChange = onToggleEnabled)
+                    Switch(
+                        checked = enabled,
+                        onCheckedChange = onToggleEnabled
+                    )
                     if (bands.isNotEmpty() && range.first != range.second) {
-                        IconButton(onClick = onReset, enabled = enabled) {
-                            Icon(Icons.Default.Refresh, contentDescription = "Reset", tint = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f))
+                        IconButton(
+                            onClick = onReset,
+                            enabled = enabled
+                        ) {
+                            Icon(
+                                Icons.Default.Refresh,
+                                contentDescription = "Reset",
+                                tint = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                            )
                         }
+                    }
+                    TextButton(onClick = dismissEqSheet) {
+                        Text("Done", fontWeight = FontWeight.Bold)
                     }
                 }
             }
-        },
-        text = {
+
             if (error != null) {
-                Text(error, color = MaterialTheme.colorScheme.error)
+                Text(
+                    text = error,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(vertical = 16.dp)
+                )
             } else if (bands.isEmpty() || range.first == range.second) {
-                Text("Equalizer is not initialized. Play a track first to adjust settings.")
+                Text(
+                    text = "Equalizer is not initialized. Play a track first to adjust settings.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(vertical = 16.dp)
+                )
             } else {
-                Column {
+                val controlsAlpha by animateFloatAsState(
+                    targetValue = if (enabled) 1f else 0.45f,
+                    animationSpec = tween(240),
+                    label = "eq_enabled_alpha"
+                )
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .graphicsLayer { alpha = controlsAlpha }
+                ) {
                     if (presets.isNotEmpty()) {
                         var expanded by remember { mutableStateOf(false) }
-                        
+
                         ExposedDropdownMenuBox(
                             expanded = enabled && expanded,
                             onExpandedChange = { if (enabled) expanded = !expanded },
-                            modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 8.dp)
                         ) {
                             OutlinedTextField(
                                 value = presetName,
@@ -1334,7 +1723,9 @@ fun EqualizerView(
                                 readOnly = true,
                                 enabled = enabled,
                                 trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-                                modifier = Modifier.menuAnchor().fillMaxWidth(),
+                                modifier = Modifier
+                                    .menuAnchor()
+                                    .fillMaxWidth(),
                                 label = { Text("Preset") }
                             )
                             ExposedDropdownMenu(
@@ -1359,25 +1750,41 @@ fun EqualizerView(
                             }
                         }
                     }
-                    
+
                     androidx.compose.foundation.lazy.LazyRow(
-                        modifier = Modifier.fillMaxWidth().height(260.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(260.dp),
                         horizontalArrangement = Arrangement.SpaceEvenly,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         items(bands) { (band, freqMilliHertz) ->
                             val freqHz = freqMilliHertz / 1000
                             val label = if (freqHz >= 1000) "${freqHz / 1000}k" else "$freqHz"
-                            
+
                             val level = settings[band] ?: 0.toShort()
-                            var sliderValue by remember(level) { mutableStateOf(level.toFloat()) }
-                            
+                            var isDragging by remember(band) { mutableStateOf(false) }
+                            var dragValue by remember(band) { mutableFloatStateOf(level.toFloat()) }
+                            LaunchedEffect(level) {
+                                if (!isDragging) {
+                                    dragValue = level.toFloat()
+                                }
+                            }
+                            val animatedSliderValue by animateFloatAsState(
+                                targetValue = if (isDragging) dragValue else level.toFloat(),
+                                animationSpec = spring(
+                                    dampingRatio = Spring.DampingRatioNoBouncy,
+                                    stiffness = Spring.StiffnessMediumLow
+                                ),
+                                label = "eq_slider_$band"
+                            )
+
                             Column(
                                 horizontalAlignment = Alignment.CenterHorizontally,
                                 modifier = Modifier.width(48.dp)
                             ) {
                                 Text(
-                                    text = "${sliderValue.toInt() / 100} dB",
+                                    text = "${animatedSliderValue.toInt() / 100} dB",
                                     style = MaterialTheme.typography.labelSmall,
                                     fontSize = 10.sp
                                 )
@@ -1389,11 +1796,15 @@ fun EqualizerView(
                                     contentAlignment = Alignment.Center
                                 ) {
                                     Slider(
-                                        value = sliderValue,
+                                        value = animatedSliderValue,
                                         enabled = enabled,
-                                        onValueChange = { 
-                                            sliderValue = it
-                                            onBandLevelChange(band, it.toInt().toShort()) 
+                                        onValueChange = {
+                                            isDragging = true
+                                            dragValue = it
+                                            onBandLevelChange(band, it.toInt().toShort())
+                                        },
+                                        onValueChangeFinished = {
+                                            isDragging = false
                                         },
                                         valueRange = range.first.toFloat()..range.second.toFloat(),
                                         modifier = Modifier
@@ -1415,11 +1826,11 @@ fun EqualizerView(
                     }
                 }
             }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text("Close") }
+
+            Spacer(modifier = Modifier.windowInsetsBottomHeight(WindowInsets.navigationBars))
+            Spacer(modifier = Modifier.height(20.dp))
         }
-    )
+    }
 }
 
 @Composable
@@ -1474,7 +1885,8 @@ fun SongListItem(
     onDownload: () -> Unit = {},
     onShare: () -> Unit = {},
     thumbnailUrl: String? = null,
-    musicNotePainter: androidx.compose.ui.graphics.painter.Painter? = null
+    musicNotePainter: androidx.compose.ui.graphics.painter.Painter? = null,
+    modifier: Modifier = Modifier
 ) {
     val primaryColor = MaterialTheme.colorScheme.primary
     val boxBackgroundColor = remember(isCurrentlyPlaying, primaryColor) {
@@ -1487,9 +1899,9 @@ fun SongListItem(
     val placeholderPainter = musicNotePainter ?: androidx.compose.ui.graphics.vector.rememberVectorPainter(Icons.Default.MusicNote)
 
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .bounceClick(scaleDown = 0.98f, onClick = onClick)
             .padding(16.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(16.dp)
@@ -1572,7 +1984,10 @@ fun SongListItem(
             }
         }
         if (file.isFolder) {
-            IconButton(onClick = onPlayFolderClick) {
+            IconButton(
+                onClick = onPlayFolderClick,
+                modifier = Modifier.bounceClick(scaleDown = 0.92f, onClick = onPlayFolderClick)
+            ) {
                 Icon(
                     imageVector = Icons.Default.PlayArrow,
                     contentDescription = "Play Folder",
@@ -1582,13 +1997,13 @@ fun SongListItem(
         } else {
             var expanded by remember { mutableStateOf(false) }
             Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onToggleFavourite) {
-                    Icon(
-                        imageVector = if (isFavourite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
-                        contentDescription = "Toggle Favourite",
-                        tint = if (isFavourite) androidx.compose.ui.graphics.Color.Red else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
+                AnimatedFavoriteButton(
+                    isFavourite = isFavourite,
+                    onToggle = onToggleFavourite,
+                    iconSize = 24.dp,
+                    activeColor = androidx.compose.ui.graphics.Color.Red,
+                    inactiveColor = MaterialTheme.colorScheme.onSurfaceVariant
+                )
                 Box {
                     IconButton(onClick = { expanded = true }) {
                         Icon(
@@ -1634,9 +2049,11 @@ fun SongListItem(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun PlaybackBottomSheet(
     controller: androidx.media3.common.Player?,
+    fallbackDurationMs: Long = 0L,
     upcomingQueue: List<DriveFile> = emptyList(),
     currentSpotifyArtUrl: String? = null,
     songThumbnails: Map<String, String> = emptyMap(),
@@ -1650,7 +2067,7 @@ fun PlaybackBottomSheet(
     onNeedsTokenRefresh: () -> Unit,
     onClearQueue: () -> Unit = {},
     onPlayQueueItem: (DriveFile) -> Unit = {},
-    onCollapse: () -> Unit = {},
+    onCollapse: (releaseVelocityY: Float) -> Unit = {},
     onSetSleepTimer: (Int) -> Unit = {},
     onCancelSleepTimer: () -> Unit = {},
     onSetSleepTimerBehavior: (Boolean) -> Unit = {},
@@ -1758,10 +2175,16 @@ fun PlaybackBottomSheet(
     var currentTrackArtist by remember { mutableStateOf("Unknown Artist") }
     var currentArtworkData by remember { mutableStateOf<ByteArray?>(null) }
     var progressMs by remember { mutableFloatStateOf(0f) }
-    var durationMs by remember { mutableFloatStateOf(1f) }
+    var durationMs by remember { mutableFloatStateOf(if (fallbackDurationMs > 0L) fallbackDurationMs.toFloat() else 0f) }
     var shuffleModeEnabled by remember { mutableStateOf(false) }
     var repeatMode by remember { mutableIntStateOf(androidx.media3.common.Player.REPEAT_MODE_OFF) }
     val context = androidx.compose.ui.platform.LocalContext.current
+
+    LaunchedEffect(fallbackDurationMs) {
+        if (fallbackDurationMs > 0L && durationMs <= 0f) {
+            durationMs = fallbackDurationMs.toFloat()
+        }
+    }
 
     DisposableEffect(controller) {
         val listener = object : androidx.media3.common.Player.Listener {
@@ -1771,7 +2194,14 @@ fun PlaybackBottomSheet(
             override fun onMediaMetadataChanged(mediaMetadata: androidx.media3.common.MediaMetadata) {
                 currentTrackTitle = mediaMetadata.title?.toString() ?: "Unknown Track"
                 currentTrackArtist = mediaMetadata.artist?.toString() ?: "Unknown Artist"
-                currentArtworkData = mediaMetadata.artworkData
+                if (mediaMetadata.artworkData != null) {
+                    currentArtworkData = mediaMetadata.artworkData
+                }
+            }
+            override fun onMediaItemTransition(mediaItem: androidx.media3.common.MediaItem?, reason: Int) {
+                val duration = controller?.duration ?: 0L
+                durationMs = if (duration > 0L) duration.toFloat() else if (fallbackDurationMs > 0L) fallbackDurationMs.toFloat() else 0f
+                progressMs = 0f
             }
             override fun onShuffleModeEnabledChanged(shuffleModeEnabledParam: Boolean) {
                 shuffleModeEnabled = shuffleModeEnabledParam
@@ -1782,8 +2212,10 @@ fun PlaybackBottomSheet(
             override fun onPlaybackStateChanged(playbackState: Int) {
                 isBuffering = playbackState == androidx.media3.common.Player.STATE_BUFFERING
                 if (playbackState == androidx.media3.common.Player.STATE_READY) {
-                    val duration = controller?.duration ?: 1L
-                    durationMs = if (duration > 0) duration.toFloat() else 1f
+                    val duration = controller?.duration ?: 0L
+                    if (duration > 0L) {
+                        durationMs = duration.toFloat()
+                    }
                 }
             }
             override fun onPositionDiscontinuity(
@@ -1816,7 +2248,11 @@ fun PlaybackBottomSheet(
             currentTrackArtist = it.mediaMetadata.artist?.toString() ?: "Unknown Artist"
             currentArtworkData = it.mediaMetadata.artworkData
             val duration = it.duration
-            durationMs = if (duration > 0) duration.toFloat() else 1f
+            if (duration > 0L) {
+                durationMs = duration.toFloat()
+            } else if (fallbackDurationMs > 0L && durationMs <= 0f) {
+                durationMs = fallbackDurationMs.toFloat()
+            }
             progressMs = it.currentPosition.toFloat()
             shuffleModeEnabled = it.shuffleModeEnabled
             repeatMode = it.repeatMode
@@ -1830,6 +2266,10 @@ fun PlaybackBottomSheet(
     LaunchedEffect(playWhenReady, controller) {
         while (playWhenReady && controller != null) {
             progressMs = controller.currentPosition.toFloat()
+            val d = controller.duration
+            if (d > 0L) {
+                durationMs = d.toFloat()
+            }
             kotlinx.coroutines.delay(1000)
         }
     }
@@ -1867,12 +2307,36 @@ fun PlaybackBottomSheet(
         animationSpec = tween(1000)
     )
 
-    val nestedScrollConnection = remember(listState) {
+    val density = LocalDensity.current
+    val dismissBufferPx = with(density) { 140.dp.toPx() }
+    val coroutineScope = rememberCoroutineScope()
+    val sheetDragOffsetY = remember { Animatable(0f) }
+    LaunchedEffect(Unit) {
+        sheetDragOffsetY.snapTo(0f)
+    }
+
+    // Latches true whenever the active finger gesture scrolls the queue list.
+    // Prevents a single scroll gesture from bleeding into sheet dismissal when the list hits an edge.
+    var listScrolledInCurrentGesture by remember { mutableStateOf(false) }
+
+    val bufferedDismissConnection = remember(listState, dismissBufferPx) {
         object : NestedScrollConnection {
             override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
-                if (available.y > 0f && listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0) {
-                    onCollapse()
-                    return Offset(0f, available.y)
+                // If the user already pulled the sheet down past 0f and drags back up,
+                // return the sheet to 0f first before scrolling the queue.
+                if (sheetDragOffsetY.value > 0f && available.y < 0f) {
+                    val updated = (sheetDragOffsetY.value + available.y).coerceAtLeast(0f)
+                    val consumedY = updated - sheetDragOffsetY.value
+                    coroutineScope.launch { sheetDragOffsetY.snapTo(updated) }
+                    return Offset(0f, consumedY)
+                }
+
+                // If dragging upward (bottom-to-top) or scrolling while the queue is not at the top,
+                // latch this gesture so it cannot minimize the sheet.
+                val isQueueAtTop = listState.firstVisibleItemIndex == 0 &&
+                    listState.firstVisibleItemScrollOffset == 0
+                if (source == NestedScrollSource.Drag && (!isQueueAtTop || available.y < 0f)) {
+                    listScrolledInCurrentGesture = true
                 }
                 return Offset.Zero
             }
@@ -1882,23 +2346,94 @@ fun PlaybackBottomSheet(
                 available: Offset,
                 source: NestedScrollSource
             ): Offset {
-                if (available.y > 0f && listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0) {
-                    onCollapse()
+                if (consumed.y != 0f) {
+                    listScrolledInCurrentGesture = true
+                }
+
+                val isQueueAtTop = listState.firstVisibleItemIndex == 0 &&
+                    listState.firstVisibleItemScrollOffset == 0
+
+                // Only pull the sheet downward on an explicit user drag when:
+                // 1. Finger is moving downward (available.y > 0f)
+                // 2. Queue is already resting at index 0, offset 0
+                // 3. This touch gesture did NOT already scroll the queue list
+                if (source == NestedScrollSource.Drag &&
+                    available.y > 0f &&
+                    isQueueAtTop &&
+                    !listScrolledInCurrentGesture
+                ) {
+                    val updated = (sheetDragOffsetY.value + available.y * 0.85f).coerceAtLeast(0f)
+                    coroutineScope.launch { sheetDragOffsetY.snapTo(updated) }
                     return Offset(0f, available.y)
                 }
+
                 return Offset.Zero
+            }
+
+            override suspend fun onPreFling(available: Velocity): Velocity {
+                if (sheetDragOffsetY.value > 0f) {
+                    if (sheetDragOffsetY.value >= dismissBufferPx) {
+                        onCollapse(available.y.coerceAtLeast(0f))
+                    } else {
+                        sheetDragOffsetY.animateTo(
+                            targetValue = 0f,
+                            animationSpec = spring(
+                                dampingRatio = Spring.DampingRatioNoBouncy,
+                                stiffness = Spring.StiffnessMedium
+                            )
+                        )
+                    }
+                    return available
+                }
+                return Velocity.Zero
+            }
+
+            override suspend fun onPostFling(consumed: Velocity, available: Velocity): Velocity {
+                listScrolledInCurrentGesture = false
+                return Velocity.Zero
             }
         }
     }
 
     Box(
-        modifier = Modifier.fillMaxSize()
+        modifier = Modifier
+            .fillMaxSize()
+            .graphicsLayer {
+                translationY = sheetDragOffsetY.value
+            }
+            .nestedScroll(bufferedDismissConnection)
+            .pointerInput(dismissBufferPx) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    if (sheetDragOffsetY.value == 0f) {
+                        listScrolledInCurrentGesture = false
+                    }
+                    do {
+                        val event = awaitPointerEvent()
+                    } while (event.changes.any { it.pressed })
+
+                    // Finger lifted: reset the scroll latch so a subsequent downward swipe can minimize
+                    listScrolledInCurrentGesture = false
+                    if (sheetDragOffsetY.value >= dismissBufferPx) {
+                        onCollapse(0f)
+                    } else if (sheetDragOffsetY.value > 0f) {
+                        coroutineScope.launch {
+                            sheetDragOffsetY.animateTo(
+                                targetValue = 0f,
+                                animationSpec = spring(
+                                    dampingRatio = Spring.DampingRatioNoBouncy,
+                                    stiffness = Spring.StiffnessMedium
+                                )
+                            )
+                        }
+                    }
+                }
+            }
     ) {
         LazyColumn(
             state = listState,
             modifier = Modifier
                 .fillMaxSize()
-                .nestedScroll(nestedScrollConnection)
                 .background(androidx.compose.ui.graphics.Brush.verticalGradient(colors = listOf(animatedColor, androidx.compose.ui.graphics.Color(0xFF09090E))))
         ) {
             // 1. Static Elements (Top Bar, Album Art, Metadata, Scrubber, Play Controls)
@@ -1915,7 +2450,7 @@ fun PlaybackBottomSheet(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                IconButton(onClick = onCollapse) {
+                IconButton(onClick = { onCollapse(0f) }) {
                     Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Close", tint = androidx.compose.ui.graphics.Color.White)
                 }
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -1960,11 +2495,23 @@ fun PlaybackBottomSheet(
         Spacer(modifier = Modifier.height(32.dp))
 
         // 3. The Album Art
+        val artScale by animateFloatAsState(
+            targetValue = if (playWhenReady) 1.0f else 0.92f,
+            animationSpec = spring(
+                dampingRatio = Spring.DampingRatioLowBouncy,
+                stiffness = Spring.StiffnessLow
+            ),
+            label = "art_scale"
+        )
         Box(
             modifier = Modifier
                 .fillMaxWidth(0.85f)
                 .aspectRatio(1f)
                 .align(Alignment.CenterHorizontally)
+                .graphicsLayer {
+                    scaleX = artScale
+                    scaleY = artScale
+                }
                 .shadow(elevation = 24.dp, shape = RoundedCornerShape(32.dp))
                 .clip(RoundedCornerShape(32.dp))
                 .background(MaterialTheme.colorScheme.surfaceVariant),
@@ -1972,66 +2519,74 @@ fun PlaybackBottomSheet(
         ) {
             val currentMediaId = controller?.currentMediaItem?.mediaId
             val effectivePlayerArt = currentSpotifyArtUrl ?: (if (!currentMediaId.isNullOrEmpty()) songThumbnails[currentMediaId] else null)
-            if (effectivePlayerArt != null) {
-                val context = androidx.compose.ui.platform.LocalContext.current
-                var isLoading by remember { mutableStateOf(true) }
-                coil.compose.AsyncImage(
-                    model = coil.request.ImageRequest.Builder(context)
-                        .data(effectivePlayerArt)
-                        .crossfade(true)
-                        .allowHardware(false) // Safely extract Bitmaps for Palette APIs directly avoiding hardware acceleration crashes
-                        .build(),
-                    contentDescription = "Album Art",
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = androidx.compose.ui.layout.ContentScale.Crop,
-                    onSuccess = { result ->
-                        isLoading = false
-                        val drawable = result.result.drawable
-                        if (drawable is android.graphics.drawable.BitmapDrawable) {
-                            val bitmap = drawable.bitmap
-                            androidx.palette.graphics.Palette.from(bitmap).generate { palette ->
-                                val swatch = palette?.dominantSwatch ?: palette?.vibrantSwatch
-                                if (swatch != null) {
-                                    dominantColor = androidx.compose.ui.graphics.Color(swatch.rgb)
-                                }
-                            }
-                        }
-                    },
-                    onLoading = {
-                        isLoading = true
-                    },
-                    onError = {
-                        isLoading = false
-                    }
-                )
-                if (isLoading) {
-                    CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
-                }
-            } else {
-                // Fallback to local ID3 or default icon
-                val currentBitmap = remember(currentArtworkData) {
-                    currentArtworkData?.let {
-                        android.graphics.BitmapFactory.decodeByteArray(it, 0, it.size)
-                    }
-                }
-                if (currentBitmap != null) {
-                    androidx.compose.foundation.Image(
-                        bitmap = currentBitmap.asImageBitmap(),
+            val resolvedArtworkUrl = effectivePlayerArt ?: if (currentArtworkData != null) "id3:$currentMediaId" else "default"
+            Crossfade(
+                targetState = resolvedArtworkUrl,
+                animationSpec = tween(280),
+                label = "now_playing_art_crossfade",
+                modifier = Modifier.fillMaxSize()
+            ) { _ ->
+                if (effectivePlayerArt != null) {
+                    val context = androidx.compose.ui.platform.LocalContext.current
+                    var isLoading by remember { mutableStateOf(true) }
+                    coil.compose.AsyncImage(
+                        model = coil.request.ImageRequest.Builder(context)
+                            .data(effectivePlayerArt)
+                            .crossfade(true)
+                            .allowHardware(false) // Safely extract Bitmaps for Palette APIs directly avoiding hardware acceleration crashes
+                            .build(),
                         contentDescription = "Album Art",
                         modifier = Modifier.fillMaxSize(),
-                        contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                        onSuccess = { result ->
+                            isLoading = false
+                            val drawable = result.result.drawable
+                            if (drawable is android.graphics.drawable.BitmapDrawable) {
+                                val bitmap = drawable.bitmap
+                                androidx.palette.graphics.Palette.from(bitmap).generate { palette ->
+                                    val swatch = palette?.dominantSwatch ?: palette?.vibrantSwatch
+                                    if (swatch != null) {
+                                        dominantColor = androidx.compose.ui.graphics.Color(swatch.rgb)
+                                    }
+                                }
+                            }
+                        },
+                        onLoading = {
+                            isLoading = true
+                        },
+                        onError = {
+                            isLoading = false
+                        }
                     )
+                    if (isLoading) {
+                        CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                    }
                 } else {
-                    Box(
-                        modifier = Modifier.fillMaxSize().background(Color(0xFF1E1E1E)),
-                        contentAlignment = Alignment.Center
-                    ) {
+                    // Fallback to local ID3 or default icon
+                    val currentBitmap = remember(currentArtworkData) {
+                        currentArtworkData?.let {
+                            android.graphics.BitmapFactory.decodeByteArray(it, 0, it.size)
+                        }
+                    }
+                    if (currentBitmap != null) {
                         androidx.compose.foundation.Image(
-                            painter = androidx.compose.ui.res.painterResource(id = R.drawable.ic_launcher_foreground),
-                            contentDescription = "Default Art",
-                            modifier = Modifier.fillMaxSize(1.8f),
-                            contentScale = androidx.compose.ui.layout.ContentScale.Fit
+                            bitmap = currentBitmap.asImageBitmap(),
+                            contentDescription = "Album Art",
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = androidx.compose.ui.layout.ContentScale.Crop
                         )
+                    } else {
+                        Box(
+                            modifier = Modifier.fillMaxSize().background(Color(0xFF1E1E1E)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            androidx.compose.foundation.Image(
+                                painter = androidx.compose.ui.res.painterResource(id = R.drawable.ic_launcher_foreground),
+                                contentDescription = "Default Art",
+                                modifier = Modifier.fillMaxSize(1.8f),
+                                contentScale = androidx.compose.ui.layout.ContentScale.Fit
+                            )
+                        }
                     }
                 }
             }
@@ -2060,19 +2615,19 @@ fun PlaybackBottomSheet(
                     ) { isTitleExpanded = !isTitleExpanded }
                 )
             }
-            IconButton(onClick = onToggleCurrentFavourite) {
-                Icon(
-                    imageVector = if (isCurrentTrackFavourite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
-                    contentDescription = "Favorite",
-                    tint = if (isCurrentTrackFavourite) androidx.compose.ui.graphics.Color.Red else androidx.compose.ui.graphics.Color.White,
-                    modifier = Modifier.size(28.dp)
-                )
-            }
+            AnimatedFavoriteButton(
+                isFavourite = isCurrentTrackFavourite,
+                onToggle = onToggleCurrentFavourite,
+                iconSize = 28.dp,
+                activeColor = androidx.compose.ui.graphics.Color.Red,
+                inactiveColor = androidx.compose.ui.graphics.Color.White
+            )
         }
 
         // 5. The Thick Scrubber
+        val effectiveDurationMs = if (durationMs > 0f) durationMs else fallbackDurationMs.toFloat()
         var sliderPosition by remember { mutableStateOf<Float?>(null) }
-        val displayProgress = sliderPosition ?: if (durationMs > 0) (progressMs / durationMs).coerceIn(0f, 1f) else 0f
+        val displayProgress = sliderPosition ?: if (effectiveDurationMs > 0f) (progressMs / effectiveDurationMs).coerceIn(0f, 1f) else 0f
 
         Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(top = 24.dp)) {
             @OptIn(ExperimentalMaterial3Api::class)
@@ -2084,7 +2639,7 @@ fun PlaybackBottomSheet(
                 },
                 onValueChangeFinished = {
                     sliderPosition?.let { fraction ->
-                        val newPosition = (fraction * durationMs).toLong()
+                        val newPosition = (fraction * effectiveDurationMs).toLong()
                         controller?.seekTo(newPosition)
                         sliderPosition = null
                     }
@@ -2128,8 +2683,8 @@ fun PlaybackBottomSheet(
                     .fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                val currentMs = (displayProgress * durationMs).toLong()
-                val totalMs = durationMs.toLong()
+                val currentMs = if (effectiveDurationMs > 0f) (displayProgress * effectiveDurationMs).toLong() else progressMs.toLong()
+                val totalMs = effectiveDurationMs.toLong()
                 Text(
                     text = String.format(java.util.Locale.US, "%02d:%02d", (currentMs / 1000) / 60, (currentMs / 1000) % 60),
                     fontSize = 12.sp,
@@ -2186,7 +2741,11 @@ fun PlaybackBottomSheet(
             }
             IconButton(
                 onClick = { controller?.seekToPrevious() },
-                enabled = sessionRole != SessionRole.GUEST
+                enabled = sessionRole != SessionRole.GUEST,
+                modifier = Modifier.bounceClick(
+                    scaleDown = 0.92f,
+                    enabled = sessionRole != SessionRole.GUEST
+                ) { controller?.seekToPrevious() }
             ) {
                 Icon(Icons.Default.SkipPrevious, contentDescription = "Previous", tint = androidx.compose.ui.graphics.Color.White, modifier = Modifier.size(32.dp))
             }
@@ -2196,7 +2755,10 @@ fun PlaybackBottomSheet(
                     .shadow(elevation = 24.dp, spotColor = animatedColor, shape = CircleShape)
                     .clip(CircleShape)
                     .background(animatedColor)
-                    .clickable(enabled = !isBuffering && sessionRole != SessionRole.GUEST) {
+                    .bounceClick(
+                        scaleDown = 0.92f,
+                        enabled = !isBuffering && sessionRole != SessionRole.GUEST
+                    ) {
                         if (playWhenReady) controller?.pause() else controller?.play()
                     },
                 contentAlignment = Alignment.Center
@@ -2208,9 +2770,9 @@ fun PlaybackBottomSheet(
                         strokeWidth = 2.dp
                     )
                 } else {
-                    Icon(
-                        if (playWhenReady) Icons.Default.Pause else Icons.Default.PlayArrow,
-                        contentDescription = "Play/Pause",
+                    AnimatedPlayPauseIcon(
+                        isPlaying = playWhenReady,
+                        contentDescription = if (playWhenReady) "Pause" else "Play",
                         tint = androidx.compose.ui.graphics.Color.White,
                         modifier = Modifier.size(40.dp)
                     )
@@ -2218,7 +2780,11 @@ fun PlaybackBottomSheet(
             }
             IconButton(
                 onClick = { controller?.seekToNext() },
-                enabled = sessionRole != SessionRole.GUEST
+                enabled = sessionRole != SessionRole.GUEST,
+                modifier = Modifier.bounceClick(
+                    scaleDown = 0.92f,
+                    enabled = sessionRole != SessionRole.GUEST
+                ) { controller?.seekToNext() }
             ) {
                 Icon(Icons.Default.SkipNext, contentDescription = "Next", tint = androidx.compose.ui.graphics.Color.White, modifier = Modifier.size(32.dp))
             }
@@ -2268,11 +2834,15 @@ fun PlaybackBottomSheet(
                 Spacer(modifier = Modifier.height(8.dp))
             }
 
-            items(upcomingQueue) { file ->
+            items(
+                items = upcomingQueue,
+                key = { if (it.fileId.isNotEmpty()) it.fileId else it.hashCode() }
+            ) { file ->
                 Row(
                     modifier = Modifier
+                        .animateItemPlacement(tween(240, easing = FastOutSlowInEasing))
                         .fillMaxWidth()
-                        .clickable(enabled = sessionRole != SessionRole.GUEST) {
+                        .bounceClick(scaleDown = 0.98f, enabled = sessionRole != SessionRole.GUEST) {
                             onPlayQueueItem(file)
                         }
                         .padding(horizontal = 24.dp, vertical = 12.dp),
@@ -2324,9 +2894,14 @@ fun PlaybackBottomSheet(
 @Composable
 fun MiniPlayer(
     controller: androidx.media3.common.Player?,
+    fallbackDurationMs: Long = 0L,
     currentSpotifyArtUrl: String?,
     songThumbnails: Map<String, String> = emptyMap(),
     sessionRole: SessionRole,
+    currentPlayingFileId: String? = null,
+    currentPlayingTrack: DriveFile? = null,
+    currentTrackIndex: Int = 0,
+    currentPlaylistName: String? = null,
     modifier: Modifier = Modifier,
     onExpand: () -> Unit
 ) {
@@ -2334,8 +2909,14 @@ fun MiniPlayer(
     var currentTrackTitle by remember { mutableStateOf(controller?.mediaMetadata?.title?.toString() ?: "No Track Selected") }
     var currentTrackArtist by remember { mutableStateOf(controller?.mediaMetadata?.artist?.toString() ?: "Unknown Artist") }
     var currentArtworkData by remember { mutableStateOf(controller?.mediaMetadata?.artworkData) }
-    var durationMs by remember { mutableStateOf(1f) }
-    var progressMs by remember { mutableStateOf(0f) }
+    var durationMs by remember { mutableFloatStateOf(if (fallbackDurationMs > 0L) fallbackDurationMs.toFloat() else 0f) }
+    var progressMs by remember { mutableFloatStateOf(0f) }
+
+    LaunchedEffect(fallbackDurationMs) {
+        if (fallbackDurationMs > 0L && durationMs <= 0f) {
+            durationMs = fallbackDurationMs.toFloat()
+        }
+    }
 
     DisposableEffect(controller) {
         val listener = object : androidx.media3.common.Player.Listener {
@@ -2345,12 +2926,21 @@ fun MiniPlayer(
             override fun onMediaMetadataChanged(mediaMetadata: androidx.media3.common.MediaMetadata) {
                 currentTrackTitle = mediaMetadata.title?.toString() ?: "Unknown Track"
                 currentTrackArtist = mediaMetadata.artist?.toString() ?: "Unknown Artist"
-                currentArtworkData = mediaMetadata.artworkData
+                if (mediaMetadata.artworkData != null) {
+                    currentArtworkData = mediaMetadata.artworkData
+                }
+            }
+            override fun onMediaItemTransition(mediaItem: androidx.media3.common.MediaItem?, reason: Int) {
+                val d = controller?.duration ?: 0L
+                durationMs = if (d > 0L) d.toFloat() else if (fallbackDurationMs > 0L) fallbackDurationMs.toFloat() else 0f
+                progressMs = 0f
             }
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (playbackState == androidx.media3.common.Player.STATE_READY) {
-                    val duration = controller?.duration ?: 1L
-                    durationMs = if (duration > 0) duration.toFloat() else 1f
+                    val d = controller?.duration ?: 0L
+                    if (d > 0L) {
+                        durationMs = d.toFloat()
+                    }
                 }
             }
             override fun onPositionDiscontinuity(
@@ -2367,8 +2957,12 @@ fun MiniPlayer(
             currentTrackTitle = it.mediaMetadata.title?.toString() ?: "No Track Selected"
             currentTrackArtist = it.mediaMetadata.artist?.toString() ?: "Unknown Artist"
             currentArtworkData = it.mediaMetadata.artworkData
-            val duration = it.duration
-            durationMs = if (duration > 0) duration.toFloat() else 1f
+            val d = it.duration
+            if (d > 0L) {
+                durationMs = d.toFloat()
+            } else if (fallbackDurationMs > 0L && durationMs <= 0f) {
+                durationMs = fallbackDurationMs.toFloat()
+            }
             progressMs = it.currentPosition.toFloat()
         }
         onDispose { controller?.removeListener(listener) }
@@ -2377,15 +2971,79 @@ fun MiniPlayer(
     LaunchedEffect(playWhenReady, controller) {
         while (playWhenReady && controller != null) {
             progressMs = controller.currentPosition.toFloat()
+            val d = controller.duration
+            if (d > 0L) {
+                durationMs = d.toFloat()
+            }
             kotlinx.coroutines.delay(1000)
         }
     }
 
-    val currentMediaId = controller?.currentMediaItem?.mediaId
-    val effectiveMiniArt = currentSpotifyArtUrl ?: (if (!currentMediaId.isNullOrEmpty()) songThumbnails[currentMediaId] else null)
+    // Upward spring entrance when playing from another playlist
+    val playlistSwitchOffsetY = remember { androidx.compose.animation.core.Animatable(0f) }
+    val playlistSwitchScale = remember { androidx.compose.animation.core.Animatable(1f) }
+    var previousPlaylistName by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(currentPlaylistName) {
+        if (previousPlaylistName != null && previousPlaylistName != currentPlaylistName && !currentPlaylistName.isNullOrEmpty()) {
+            playlistSwitchOffsetY.snapTo(42f)
+            playlistSwitchScale.snapTo(0.96f)
+            launch {
+                playlistSwitchOffsetY.animateTo(
+                    targetValue = 0f,
+                    animationSpec = spring(
+                        dampingRatio = Spring.DampingRatioMediumBouncy,
+                        stiffness = Spring.StiffnessMediumLow
+                    )
+                )
+            }
+            launch {
+                playlistSwitchScale.animateTo(
+                    targetValue = 1f,
+                    animationSpec = spring(
+                        dampingRatio = Spring.DampingRatioMediumBouncy,
+                        stiffness = Spring.StiffnessMediumLow
+                    )
+                )
+            }
+        }
+        previousPlaylistName = currentPlaylistName
+    }
+
+    val resolvedFileId = currentPlayingTrack?.fileId
+        ?: currentPlayingFileId
+        ?: controller?.currentMediaItem?.mediaId
+        ?: ""
+    val resolvedTitle = currentPlayingTrack?.name?.takeIf { it.isNotBlank() }
+        ?: currentTrackTitle.takeIf { it.isNotBlank() && it != "No Track Selected" }
+        ?: "Unknown Track"
+    val resolvedArtist = currentTrackArtist.takeIf { it.isNotBlank() && it != "Unknown Artist" }
+        ?: "DriveStream"
+    val resolvedArtUrl = currentPlayingTrack?.let { track ->
+        track.thumbnailUrl ?: songThumbnails[track.fileId] ?: track.albumArtUrl
+    } ?: currentSpotifyArtUrl ?: (if (resolvedFileId.isNotEmpty()) songThumbnails[resolvedFileId] else null)
+
+    var lastFileId by remember { mutableStateOf(resolvedFileId) }
+    var lastIndex by remember { mutableIntStateOf(currentTrackIndex) }
+    var isMovingForward by remember { mutableStateOf(true) }
+
+    if (resolvedFileId.isNotEmpty() && resolvedFileId != lastFileId) {
+        isMovingForward = currentTrackIndex >= lastIndex
+        lastFileId = resolvedFileId
+        lastIndex = currentTrackIndex
+    } else if (resolvedFileId == lastFileId) {
+        lastIndex = currentTrackIndex
+    }
+
+    val trackSnapshot = MiniPlayerTrackSnapshot(
+        fileId = resolvedFileId,
+        title = resolvedTitle,
+        artist = resolvedArtist,
+        artUrl = resolvedArtUrl,
+        artworkData = currentArtworkData
+    )
 
     var dominantColor by remember { mutableStateOf(androidx.compose.ui.graphics.Color(0xFF1E1E1E)) }
-    if (effectiveMiniArt == null) {
+    if (resolvedArtUrl == null) {
         val currentBitmap = remember(currentArtworkData) {
             currentArtworkData?.let { android.graphics.BitmapFactory.decodeByteArray(it, 0, it.size) }
         }
@@ -2408,11 +3066,16 @@ fun MiniPlayer(
         }
     }
 
-    val animatedColor by animateColorAsState(targetValue = dominantColor, animationSpec = tween(1000))
+    val animatedColor by animateColorAsState(targetValue = dominantColor, animationSpec = tween(1000), label = "miniplayer_color")
 
     Column(
         modifier = modifier
             .fillMaxWidth()
+            .graphicsLayer {
+                translationY = playlistSwitchOffsetY.value
+                scaleX = playlistSwitchScale.value
+                scaleY = playlistSwitchScale.value
+            }
             .background(animatedColor)
             .navigationBarsPadding()
     ) {
@@ -2429,113 +3092,200 @@ fun MiniPlayer(
                         }
                     }
                 }
-                .clickable { onExpand() }
+                .bounceClick(scaleDown = 0.98f) { onExpand() }
         ) {
-        Row(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 8.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
+            Row(
                 modifier = Modifier
-                    .size(48.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.2f)),
-                contentAlignment = Alignment.Center
+                    .fillMaxSize()
+                    .padding(horizontal = 8.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                if (effectiveMiniArt != null) {
-                    val context = androidx.compose.ui.platform.LocalContext.current
-                    coil.compose.AsyncImage(
-                        model = coil.request.ImageRequest.Builder(context)
-                            .data(effectiveMiniArt)
-                            .crossfade(true)
-                            .allowHardware(false)
-                            .build(),
-                        contentDescription = "Album Art",
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
-                        onSuccess = { result ->
-                            val drawable = result.result.drawable
-                            if (drawable is android.graphics.drawable.BitmapDrawable) {
-                                androidx.palette.graphics.Palette.from(drawable.bitmap).generate { palette ->
-                                    val swatch = palette?.dominantSwatch ?: palette?.vibrantSwatch
-                                    if (swatch != null) {
-                                        dominantColor = androidx.compose.ui.graphics.Color(swatch.rgb).copy(alpha = 0.5f)
+                AnimatedContent(
+                    targetState = trackSnapshot,
+                    contentKey = { it.fileId },
+                    transitionSpec = {
+                        if (isMovingForward) {
+                            (slideInVertically(
+                                animationSpec = tween(240, easing = FastOutSlowInEasing),
+                                initialOffsetY = { height -> (height * 0.45f).toInt() }
+                            ) + fadeIn(animationSpec = tween(200, easing = FastOutSlowInEasing))) togetherWith
+                                (slideOutVertically(
+                                    animationSpec = tween(190, easing = FastOutLinearInEasing),
+                                    targetOffsetY = { height -> -(height * 0.45f).toInt() }
+                                ) + fadeOut(animationSpec = tween(150, easing = FastOutLinearInEasing)))
+                        } else {
+                            (slideInVertically(
+                                animationSpec = tween(240, easing = FastOutSlowInEasing),
+                                initialOffsetY = { height -> -(height * 0.45f).toInt() }
+                            ) + fadeIn(animationSpec = tween(200, easing = FastOutSlowInEasing))) togetherWith
+                                (slideOutVertically(
+                                    animationSpec = tween(190, easing = FastOutLinearInEasing),
+                                    targetOffsetY = { height -> (height * 0.45f).toInt() }
+                                ) + fadeOut(animationSpec = tween(150, easing = FastOutLinearInEasing)))
+                        }
+                    },
+                    label = "miniplayer_track_slide",
+                    modifier = Modifier.weight(1f).clipToBounds()
+                ) { snapshot ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clipToBounds(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(48.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.2f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Crossfade(
+                                targetState = snapshot.artUrl,
+                                animationSpec = tween(220),
+                                label = "mini_art_crossfade"
+                            ) { artUrl ->
+                                if (artUrl != null) {
+                                    val context = androidx.compose.ui.platform.LocalContext.current
+                                    coil.compose.AsyncImage(
+                                        model = coil.request.ImageRequest.Builder(context)
+                                            .data(artUrl)
+                                            .crossfade(true)
+                                            .allowHardware(false)
+                                            .build(),
+                                        contentDescription = "Album Art",
+                                        modifier = Modifier.fillMaxSize(),
+                                        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                                        onSuccess = { result ->
+                                            val drawable = result.result.drawable
+                                            if (drawable is android.graphics.drawable.BitmapDrawable) {
+                                                androidx.palette.graphics.Palette.from(drawable.bitmap).generate { palette ->
+                                                    val swatch = palette?.dominantSwatch ?: palette?.vibrantSwatch
+                                                    if (swatch != null) {
+                                                        dominantColor = androidx.compose.ui.graphics.Color(swatch.rgb).copy(alpha = 0.5f)
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    )
+                                } else if (snapshot.artworkData != null) {
+                                    val bitmap = remember(snapshot.artworkData) {
+                                        android.graphics.BitmapFactory.decodeByteArray(snapshot.artworkData, 0, snapshot.artworkData.size)
+                                    }
+                                    if (bitmap != null) {
+                                        androidx.compose.foundation.Image(
+                                            bitmap = bitmap.asImageBitmap(),
+                                            contentDescription = "Album Art",
+                                            modifier = Modifier.fillMaxSize(),
+                                            contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                                        )
+                                    }
+                                } else {
+                                    Box(
+                                        modifier = Modifier.fillMaxSize().background(Color(0xFF1E1E1E)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        androidx.compose.foundation.Image(
+                                            painter = androidx.compose.ui.res.painterResource(id = R.drawable.ic_launcher_foreground),
+                                            contentDescription = "Default Art",
+                                            modifier = Modifier.fillMaxSize(1.8f),
+                                            contentScale = androidx.compose.ui.layout.ContentScale.Fit
+                                        )
                                     }
                                 }
                             }
                         }
-                    )
-                } else if (currentArtworkData != null) {
-                    val bitmap = android.graphics.BitmapFactory.decodeByteArray(currentArtworkData!!, 0, currentArtworkData!!.size)
-                    androidx.compose.foundation.Image(
-                        bitmap = bitmap.asImageBitmap(),
-                        contentDescription = "Album Art",
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = androidx.compose.ui.layout.ContentScale.Crop
-                    )
-                } else {
-                    Box(
-                        modifier = Modifier.fillMaxSize().background(Color(0xFF1E1E1E)),
-                        contentAlignment = Alignment.Center
+
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(horizontal = 12.dp)
+                        ) {
+                            Text(
+                                text = snapshot.title,
+                                color = androidx.compose.ui.graphics.Color.White,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = snapshot.artist,
+                                color = androidx.compose.ui.graphics.Color.LightGray,
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+
+                IconButton(
+                    onClick = {
+                        if (sessionRole != SessionRole.GUEST) {
+                            if (playWhenReady) controller?.pause() else controller?.play()
+                        }
+                    },
+                    modifier = Modifier.bounceClick(
+                        scaleDown = 0.88f,
+                        enabled = sessionRole != SessionRole.GUEST
                     ) {
-                        androidx.compose.foundation.Image(
-                            painter = androidx.compose.ui.res.painterResource(id = R.drawable.ic_launcher_foreground),
-                            contentDescription = "Default Art",
-                            modifier = Modifier.fillMaxSize(1.8f),
-                            contentScale = androidx.compose.ui.layout.ContentScale.Fit
-                        )
+                        if (sessionRole != SessionRole.GUEST) {
+                            if (playWhenReady) controller?.pause() else controller?.play()
+                        }
                     }
+                ) {
+                    AnimatedPlayPauseIcon(
+                        isPlaying = playWhenReady,
+                        contentDescription = if (playWhenReady) "Pause" else "Play",
+                        tint = androidx.compose.ui.graphics.Color.White
+                    )
+                }
+
+                IconButton(
+                    onClick = {
+                        if (sessionRole != SessionRole.GUEST) {
+                            controller?.seekToNext()
+                        }
+                    },
+                    modifier = Modifier.bounceClick(
+                        scaleDown = 0.88f,
+                        enabled = sessionRole != SessionRole.GUEST
+                    ) {
+                        if (sessionRole != SessionRole.GUEST) {
+                            controller?.seekToNext()
+                        }
+                    }
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.SkipNext,
+                        contentDescription = "Skip Next",
+                        tint = if (sessionRole != SessionRole.GUEST) androidx.compose.ui.graphics.Color.White else androidx.compose.ui.graphics.Color.White.copy(alpha = 0.38f)
+                    )
                 }
             }
-            Column(
+            
+            val effectiveDurationMs = if (durationMs > 0f) durationMs else fallbackDurationMs.toFloat()
+            val rawProgress = if (effectiveDurationMs > 0f) {
+                (progressMs / effectiveDurationMs).coerceIn(0f, 1f)
+            } else {
+                0f
+            }
+            val animatedProgress by animateFloatAsState(
+                targetValue = rawProgress,
+                animationSpec = if (effectiveDurationMs <= 0f) snap() else tween(150, easing = LinearEasing),
+                label = "miniplayer_progress"
+            )
+            LinearProgressIndicator(
+                progress = { animatedProgress },
                 modifier = Modifier
-                    .weight(1f)
-                    .padding(horizontal = 12.dp)
-            ) {
-                Text(
-                    text = currentTrackTitle,
-                    color = androidx.compose.ui.graphics.Color.White,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    text = currentTrackArtist,
-                    color = androidx.compose.ui.graphics.Color.LightGray,
-                    fontSize = 12.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-            IconButton(
-                onClick = {
-                    if (sessionRole != SessionRole.GUEST) {
-                        if (playWhenReady) controller?.pause() else controller?.play()
-                    }
-                }
-            ) {
-                Icon(
-                    if (playWhenReady) Icons.Default.Pause else Icons.Default.PlayArrow,
-                    contentDescription = "Play/Pause",
-                    tint = androidx.compose.ui.graphics.Color.White
-                )
-            }
+                    .fillMaxWidth()
+                    .align(Alignment.BottomCenter)
+                    .height(2.dp),
+                color = MaterialTheme.colorScheme.primary,
+                trackColor = androidx.compose.ui.graphics.Color.Transparent,
+            )
         }
-        
-        val progress = if (durationMs > 0) (progressMs / durationMs).coerceIn(0f, 1f) else 0f
-        LinearProgressIndicator(
-            progress = { progress },
-            modifier = Modifier
-                .fillMaxWidth()
-                .align(Alignment.BottomCenter)
-                .height(2.dp),
-            color = MaterialTheme.colorScheme.primary,
-            trackColor = androidx.compose.ui.graphics.Color.Transparent,
-        )
-    }
     }
 }
 

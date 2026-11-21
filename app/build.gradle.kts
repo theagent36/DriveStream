@@ -36,8 +36,8 @@ android {
         applicationId = "com.example.drivestream"
         minSdk = 24
         targetSdk = 35
-        versionCode = 19
-        versionName = "3.3"
+        versionCode = 20
+        versionName = "3.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -47,17 +47,27 @@ android {
         buildConfigField("String", "GOOGLE_CLIENT_ID", getLocalProperty("GOOGLE_CLIENT_ID"))
         buildConfigField("String", "SPOTIFY_CLIENT_ID", getLocalProperty("SPOTIFY_CLIENT_ID"))
         buildConfigField("String", "SPOTIFY_CLIENT_SECRET", getLocalProperty("SPOTIFY_CLIENT_SECRET"))
-        buildConfigField("String", "FIREBASE_DATABASE_URL", getLocalProperty("FIREBASE_DATABASE_URL", "https://drivestream-af6a3-default-rtdb.asia-southeast1.firebasedatabase.app"))
+        buildConfigField("String", "FIREBASE_DATABASE_URL", getLocalProperty("FIREBASE_DATABASE_URL"))
     }
 
     signingConfigs {
         create("release") {
-            if (keystorePropertiesFile.exists() && keystoreProperties.containsKey("storeFile")) {
-                storeFile = file(keystoreProperties["storeFile"] as String)
-                storePassword = keystoreProperties["storePassword"] as String
-                keyAlias = keystoreProperties["keyAlias"] as String
-                keyPassword = keystoreProperties["keyPassword"] as String
+            require(keystorePropertiesFile.exists()) {
+                "keystore.properties not found at ${keystorePropertiesFile.absolutePath}. Cannot build signed release APK."
             }
+            val storePath = keystoreProperties.getProperty("storeFile")?.trim()
+                ?: error("Missing 'storeFile' in keystore.properties")
+            val resolvedStoreFile = file(storePath)
+            require(resolvedStoreFile.exists()) {
+                "Release keystore file not found at ${resolvedStoreFile.absolutePath}"
+            }
+            storeFile = resolvedStoreFile
+            storePassword = keystoreProperties.getProperty("storePassword")
+                ?: error("Missing 'storePassword' in keystore.properties")
+            keyAlias = keystoreProperties.getProperty("keyAlias")
+                ?: error("Missing 'keyAlias' in keystore.properties")
+            keyPassword = keystoreProperties.getProperty("keyPassword")
+                ?: error("Missing 'keyPassword' in keystore.properties")
         }
     }
 
@@ -69,13 +79,11 @@ android {
             isMinifyEnabled = false
             isShrinkResources = false
             isDebuggable = false
+            signingConfig = signingConfigs.getByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            if (keystorePropertiesFile.exists() && keystoreProperties.containsKey("storeFile")) {
-                signingConfig = signingConfigs.getByName("release")
-            }
         }
     }
 

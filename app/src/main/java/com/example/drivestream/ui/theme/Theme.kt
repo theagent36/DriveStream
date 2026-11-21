@@ -2,6 +2,9 @@ package com.example.drivestream.ui.theme
 
 import android.app.Activity
 import android.os.Build
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
@@ -10,6 +13,7 @@ import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
@@ -92,11 +96,53 @@ fun DriveStreamTheme(
     // 2. Override primary + primaryContainer with the chosen accent
     val chosenPrimary = accentPrimary(accentColor)
     val onPrimaryColor = if (accentColor == AccentColor.GREEN) Color.Black else Color.White
+
+    val themeColorSpec = tween<Color>(durationMillis = 380, easing = FastOutSlowInEasing)
+
+    val animatedPrimary by animateColorAsState(
+        targetValue = chosenPrimary,
+        animationSpec = themeColorSpec,
+        label = "theme_primary"
+    )
+    val animatedPrimaryContainer by animateColorAsState(
+        targetValue = accentContainer(accentColor),
+        animationSpec = themeColorSpec,
+        label = "theme_primary_container"
+    )
+    val animatedOnPrimary by animateColorAsState(
+        targetValue = onPrimaryColor,
+        animationSpec = themeColorSpec,
+        label = "theme_on_primary"
+    )
+    val animatedOnPrimaryContainer by animateColorAsState(
+        targetValue = onPrimaryColor,
+        animationSpec = themeColorSpec,
+        label = "theme_on_primary_container"
+    )
+    val animatedBackground by animateColorAsState(
+        targetValue = baseScheme.background,
+        animationSpec = themeColorSpec,
+        label = "theme_background"
+    )
+    val animatedSurface by animateColorAsState(
+        targetValue = baseScheme.surface,
+        animationSpec = themeColorSpec,
+        label = "theme_surface"
+    )
+    val animatedSurfaceVariant by animateColorAsState(
+        targetValue = baseScheme.surfaceVariant,
+        animationSpec = themeColorSpec,
+        label = "theme_surface_variant"
+    )
+
     val colorScheme = baseScheme.copy(
-        primary          = chosenPrimary,
-        primaryContainer = accentContainer(accentColor),
-        onPrimary        = onPrimaryColor,
-        onPrimaryContainer = onPrimaryColor
+        primary = animatedPrimary,
+        primaryContainer = animatedPrimaryContainer,
+        onPrimary = animatedOnPrimary,
+        onPrimaryContainer = animatedOnPrimaryContainer,
+        background = animatedBackground,
+        surface = animatedSurface,
+        surfaceVariant = animatedSurfaceVariant
     )
 
     val view = LocalView.current

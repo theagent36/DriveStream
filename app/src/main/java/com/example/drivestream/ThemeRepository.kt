@@ -35,6 +35,7 @@ class ThemeRepository(private val context: Context) {
     private val PLAYBACK_QUEUE_KEY = stringPreferencesKey("playback_queue")
     private val CURRENT_TRACK_ID_KEY = stringPreferencesKey("current_track_id")
     private val CURRENT_POSITION_KEY = longPreferencesKey("current_position")
+    private val CURRENT_DURATION_KEY = longPreferencesKey("current_duration")
     private val CURRENT_FOLDER_NAME_KEY = stringPreferencesKey("current_folder_name")
     
     // Favourites
@@ -123,6 +124,9 @@ class ThemeRepository(private val context: Context) {
     
     val currentTrackIdFlow: Flow<String?> = context.dataStore.data.map { it[CURRENT_TRACK_ID_KEY] }
     val currentPositionFlow: Flow<Long> = context.dataStore.data.map { it[CURRENT_POSITION_KEY] ?: 0L }
+    val currentDurationFlow: Flow<Long> = context.dataStore.data.map { preferences ->
+        preferences[CURRENT_DURATION_KEY] ?: 0L
+    }
     val currentFolderNameFlow: Flow<String?> = context.dataStore.data.map { it[CURRENT_FOLDER_NAME_KEY] }
 
     val musicFolderPromptShownFlow: Flow<Boolean> = context.dataStore.data.map { it[MUSIC_FOLDER_PROMPT_SHOWN_KEY] ?: false }
@@ -153,7 +157,13 @@ class ThemeRepository(private val context: Context) {
         }
     }
     
-    suspend fun savePlaybackState(queue: List<DriveFile>, currentTrackId: String?, position: Long, folderName: String?) {
+    suspend fun savePlaybackState(
+        queue: List<DriveFile>,
+        currentTrackId: String?,
+        position: Long,
+        folderName: String? = null,
+        durationMs: Long = 0L
+    ) {
         context.dataStore.edit { preferences ->
             // For large folders, we limit to the first 500 tracks to avoid massive JSON strings
             val limitedQueue = queue.take(500)
@@ -163,6 +173,7 @@ class ThemeRepository(private val context: Context) {
             else preferences.remove(CURRENT_TRACK_ID_KEY)
             
             preferences[CURRENT_POSITION_KEY] = position
+            preferences[CURRENT_DURATION_KEY] = durationMs.coerceAtLeast(0L)
             
             if (folderName != null) preferences[CURRENT_FOLDER_NAME_KEY] = folderName
             else preferences.remove(CURRENT_FOLDER_NAME_KEY)

@@ -160,11 +160,23 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
     private val _accentColor = MutableStateFlow(AccentColor.BLUE)
     val accentColor: StateFlow<AccentColor> = _accentColor.asStateFlow()
     
-    private val _uiState = MutableStateFlow<DriveUiState>(DriveUiState.Idle)
+    private val cachedAccount: GoogleSignInAccount? = GoogleSignIn.getLastSignedInAccount(application)
+
+    private val _activeAccount = MutableStateFlow<GoogleSignInAccount?>(cachedAccount)
+    val activeAccount: StateFlow<GoogleSignInAccount?> = _activeAccount.asStateFlow()
+
+    private val _uiState = MutableStateFlow<DriveUiState>(
+        if (cachedAccount != null) DriveUiState.Loading else DriveUiState.Idle
+    )
     val uiState: StateFlow<DriveUiState> = _uiState.asStateFlow()
 
-    private val _activeAccount = MutableStateFlow<GoogleSignInAccount?>(null)
-    val activeAccount: StateFlow<GoogleSignInAccount?> = _activeAccount.asStateFlow()
+    private val _isInitialFolderReady = MutableStateFlow(cachedAccount == null)
+    val isInitialFolderReady: StateFlow<Boolean> = _isInitialFolderReady.asStateFlow()
+
+    private val folderPageCache = FolderPageCache(application)
+
+    private val _isBackgroundRefreshing = MutableStateFlow(false)
+    val isBackgroundRefreshing: StateFlow<Boolean> = _isBackgroundRefreshing.asStateFlow()
 
     private val _sortState = MutableStateFlow(SortState(SortProperty.DATE, SortDirection.DESCENDING))
     val sortState: StateFlow<SortState> = _sortState.asStateFlow()
@@ -242,6 +254,12 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
     // Currently playing track indicators
     private val _currentPlayingFileId = MutableStateFlow<String?>(null)
     val currentPlayingFileId: StateFlow<String?> = _currentPlayingFileId.asStateFlow()
+
+    private val _currentPlayingTrack = MutableStateFlow<DriveFile?>(null)
+    val currentPlayingTrack: StateFlow<DriveFile?> = _currentPlayingTrack.asStateFlow()
+
+    private val _activeTrackDurationMs = MutableStateFlow(0L)
+    val activeTrackDurationMs: StateFlow<Long> = _activeTrackDurationMs.asStateFlow()
 
     private val _isPlaying = MutableStateFlow(false)
     val isPlaying: StateFlow<Boolean> = _isPlaying.asStateFlow()
@@ -350,7 +368,7 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun refreshCurrentFolder() {
-        fetchCurrentFolder()
+        fetchCurrentFolder(forceShowLoading = false)
     }
 
     fun refreshCacheSize() {
@@ -434,13 +452,17 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
             themeRepository.equalizerPresetFlow.collect { _eqPresetName.value = it }
         }
         viewModelScope.launch {
-            themeRepository.dataSaverFlow.collect { newValue ->
-                val changed = _isDataSaverEnabled.value != newValue
-                _isDataSaverEnabled.value = newValue
-                if (changed) {
-                    handleDataSaverToggleRecovery(newValue)
+            var isInitial = true
+            themeRepository.dataSaverFlow
+                .distinctUntilChanged()
+                .collect { newValue ->
+                    _isDataSaverEnabled.value = newValue
+                    if (isInitial) {
+                        isInitial = false
+                    } else {
+                        handleDataSaverToggleRecovery(newValue)
+                    }
                 }
-            }
         }
         viewModelScope.launch {
             themeRepository.accentColorFlow.collect { _accentColor.value = it }
@@ -477,13 +499,35 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
             .requestEmail()
             .requestScopes(com.google.android.gms.common.api.Scope(com.google.api.services.drive.DriveScopes.DRIVE_READONLY))
             .build()
-        val lastAccount = GoogleSignIn.getLastSignedInAccount(application)
+        val lastAccount = cachedAccount
         if (lastAccount != null) {
-            // Restore UI immediately with the cached account so the app feels instant
             _activeAccount.value = lastAccount
             repository.initializeDriveService(lastAccount)
             resolveMp3FolderIdAsync()
-            viewModelScope.launch { fetchCurrentFolder() }
+            viewModelScope.launch {
+                val savedDefId = themeRepository.defaultMusicFolderIdFlow.firstOrNull()
+                val savedDefName = themeRepository.defaultMusicFolderNameFlow.firstOrNull()
+                _defaultMusicFolderId.value = savedDefId
+                _defaultMusicFolderName.value = savedDefName
+                if (!savedDefId.isNullOrEmpty() && !savedDefName.isNullOrEmpty() && !hasAutoNavigatedToDefaultFolder) {
+                    hasAutoNavigatedToDefaultFolder = true
+                    myDriveStack.clear()
+                    myDriveStack.add(Pair("root", "My Drive"))
+                    myDriveStack.add(Pair(savedDefId, savedDefName))
+                    _currentFolder.value = Pair(savedDefId, savedDefName)
+                }
+                _isInitialFolderReady.value = true
+
+                val initialFolderId = myDriveStack.last().first
+                val cached = folderPageCache.get(initialFolderId)
+                if (cached != null) {
+                    applySortToFiles(cached, _sortState.value)
+                    fetchCurrentFolder(forceShowLoading = false)
+                } else {
+                    fetchCurrentFolder(forceShowLoading = true)
+                }
+                restorePlaybackState()
+            }
             // Then silently refresh the token in the background to keep it valid
             GoogleSignIn.getClient(application, gso).silentSignIn()
                 .addOnSuccessListener { freshAccount ->
@@ -497,6 +541,7 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
                     android.util.Log.w("DriveViewModel", "Silent sign-in failed, clearing session", it)
                     _activeAccount.value = null
                     _uiState.value = DriveUiState.Idle
+                    _isInitialFolderReady.value = true
                 }
         }
         // Debounced search — fires 500ms after user stops typing, min 2 chars
@@ -636,7 +681,48 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
             if (_sessionRole.value != SessionRole.GUEST) {
                 _player.value = controller
             }
-            viewModelScope.launch { restorePlaybackState() }
+
+            val activeItem = controller.currentMediaItem
+            if (activeItem != null) {
+                val mediaId = activeItem.mediaId
+                _currentPlayingFileId.value = mediaId
+                val fallbackFile = DriveFile(
+                    fileId = mediaId,
+                    name = activeItem.mediaMetadata.title?.toString() ?: "Unknown Track",
+                    size = 0L,
+                    mimeType = activeItem.localConfiguration?.mimeType ?: "audio/mpeg",
+                    isFolder = false,
+                    modifiedTime = "",
+                    displaySize = "",
+                    displayDate = ""
+                )
+                val resolvedFile = activeMediaMap[mediaId] ?: fallbackFile
+                currentPlayingFile = resolvedFile
+                _currentPlayingTrack.value = resolvedFile
+                activeMediaMap[mediaId] = resolvedFile
+                if (controller.duration > 0L) {
+                    _activeTrackDurationMs.value = controller.duration
+                } else if (resolvedFile.durationMs > 0L) {
+                    _activeTrackDurationMs.value = resolvedFile.durationMs
+                }
+
+                val queueIdx = _activeQueue.value.indexOfFirst { it.fileId == mediaId }
+                if (queueIdx != -1) {
+                    _currentIndex.value = queueIdx
+                }
+
+                val artUrl = activeItem.mediaMetadata.artworkUri?.toString()
+                    ?: _songThumbnails.value[mediaId]
+                    ?: SpotifyAuthManager.getCachedArtUrl(resolvedFile.name)
+                    ?: SpotifyAuthManager.getCachedArtUrl(mediaId)
+                if (!artUrl.isNullOrEmpty()) {
+                    _currentSpotifyArtUrl.value = artUrl
+                }
+                _isPlaying.value = controller.isPlaying
+                hasRestoredPlayback = true
+            } else {
+                viewModelScope.launch { restorePlaybackState() }
+            }
             
             controller.addListener(object : androidx.media3.common.Player.Listener {
                 override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
@@ -645,18 +731,89 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
                         controller.pause()
                         return
                     }
+
+                    val currentPlayerIdx = controller.currentMediaItemIndex
+                    if (currentPlayerIdx > 0) {
+                        controller.removeMediaItems(0, currentPlayerIdx)
+                    }
+
                     // Update currently playing file ID and index in activeQueue without reshuffling
-                    _currentPlayingFileId.value = mediaItem?.mediaId
                     val currentId = mediaItem?.mediaId
-                    if (currentId != null) {
+                    _currentPlayingFileId.value = currentId
+                    val resolvedFile = if (currentId != null) {
                         val idx = _activeQueue.value.indexOfFirst { it.fileId == currentId }
                         if (idx != -1) {
                             _currentIndex.value = idx
+                            _activeQueue.value[idx].also { currentPlayingFile = it }
+                        } else {
+                            activeMediaMap[currentId]?.also { currentPlayingFile = it }
+                        }
+                    } else null
+                    _currentPlayingTrack.value = resolvedFile ?: currentPlayingFile
+                    _activeTrackDurationMs.value = if (controller.duration > 0L) controller.duration else (currentPlayingFile?.durationMs ?: resolvedFile?.durationMs ?: 0L)
+
+                    val fileId = mediaItem?.mediaId
+                    val currentPoster = mediaItem?.mediaMetadata?.artworkUri?.toString()
+                        ?: if (fileId != null) _songThumbnails.value[fileId] else null
+                        ?: (currentPlayingFile?.name?.let { SpotifyAuthManager.getCachedArtUrl(it) })
+                        ?: (fileId?.let { SpotifyAuthManager.getCachedArtUrl(it) })
+
+                    if (!currentPoster.isNullOrBlank()) {
+                        _currentSpotifyArtUrl.value = currentPoster
+                    } else if (reason != Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT) {
+                        _currentSpotifyArtUrl.value = null
+                        currentPlayingFile?.let { file ->
+                            loadThumbnailsForFiles(listOf(file))
+                        }
+                    }
+
+                    if (controller.playWhenReady) {
+                        if (controller.playbackState == Player.STATE_IDLE) {
+                            controller.prepare()
+                        }
+                        if (!controller.isPlaying &&
+                            controller.playbackSuppressionReason == Player.PLAYBACK_SUPPRESSION_REASON_NONE
+                        ) {
+                            controller.play()
                         }
                     }
 
                     // Look-Ahead Queue Resolution: Maintain next upcoming MediaItem sequentially from activeQueue
                     prefetchNextSongLookAhead()
+                }
+
+                override fun onMediaMetadataChanged(mediaMetadata: androidx.media3.common.MediaMetadata) {
+                    val artUri = mediaMetadata.artworkUri?.toString()
+                    if (!artUri.isNullOrBlank()) {
+                        _currentSpotifyArtUrl.value = artUri
+                    }
+                }
+
+                override fun onPlaybackStateChanged(playbackState: Int) {
+                    if (playbackState == Player.STATE_READY) {
+                        if (controller.duration > 0L) {
+                            _activeTrackDurationMs.value = controller.duration
+                        }
+                        if (controller.playWhenReady &&
+                            !controller.isPlaying &&
+                            controller.playbackSuppressionReason == Player.PLAYBACK_SUPPRESSION_REASON_NONE
+                        ) {
+                            controller.play()
+                        }
+                    } else if (playbackState == Player.STATE_ENDED) {
+                        if (_sleepTimerPauseAfterTrackPending.value) {
+                            _sleepTimerPauseAfterTrackPending.value = false
+                            controller.pause()
+                            return
+                        }
+                        val queue = _activeQueue.value
+                        val nextIdx = _currentIndex.value + 1
+                        if (nextIdx in queue.indices) {
+                            playAudio(queue[nextIdx], fromQueue = true)
+                        } else if (controller.repeatMode == Player.REPEAT_MODE_ALL && queue.isNotEmpty()) {
+                            playAudio(queue[0], fromQueue = true)
+                        }
+                    }
                 }
 
                 override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) {
@@ -748,6 +905,8 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
 
                 currentPlayingFile = file
                 _currentPlayingFileId.value = file.fileId
+                _currentPlayingTrack.value = file
+                _activeTrackDurationMs.value = file.durationMs.coerceAtLeast(0L)
 
                 // BRANCH A: Track belongs to the current active queue -> NEVER reshuffle
                 if (isSameQueue) {
@@ -912,6 +1071,10 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
             ?: _songThumbnails.value[file.fileId]
             ?: SpotifyAuthManager.getCachedArtUrl(file.name)
 
+        if (!artUrl.isNullOrEmpty()) {
+            _currentSpotifyArtUrl.value = artUrl
+        }
+
         val mediaMetadata = MediaMetadata.Builder()
             .setTitle(file.name)
             .setArtist("DriveStream")
@@ -965,6 +1128,16 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
                     _currentIndex.value = 0
                     activeAudioPlaylist = queueToPlay
                     currentPlayingFile = queueToPlay.firstOrNull()
+                    _currentPlayingFileId.value = queueToPlay.firstOrNull()?.fileId
+                    _currentPlayingTrack.value = queueToPlay.firstOrNull()
+                    _activeTrackDurationMs.value = queueToPlay.firstOrNull()?.durationMs?.coerceAtLeast(0L) ?: 0L
+
+                    val firstArt = queueToPlay.firstOrNull()?.let { f ->
+                        f.thumbnailUrl ?: _songThumbnails.value[f.fileId] ?: SpotifyAuthManager.getCachedArtUrl(f.name)
+                    }
+                    if (!firstArt.isNullOrEmpty()) {
+                        _currentSpotifyArtUrl.value = firstArt
+                    }
 
                     var mp3Map: Map<String, DriveFile> = emptyMap()
                     var targetFolderId = mp3FolderId ?: repository.cachedMp3FolderId
@@ -1074,6 +1247,16 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
                 _currentIndex.value = 0
                 activeAudioPlaylist = queueToPlay
                 currentPlayingFile = queueToPlay.firstOrNull()
+                _currentPlayingFileId.value = queueToPlay.firstOrNull()?.fileId
+                _currentPlayingTrack.value = queueToPlay.firstOrNull()
+                _activeTrackDurationMs.value = queueToPlay.firstOrNull()?.durationMs?.coerceAtLeast(0L) ?: 0L
+
+                val firstArt = queueToPlay.firstOrNull()?.let { f ->
+                    f.thumbnailUrl ?: _songThumbnails.value[f.fileId] ?: SpotifyAuthManager.getCachedArtUrl(f.name)
+                }
+                if (!firstArt.isNullOrEmpty()) {
+                    _currentSpotifyArtUrl.value = firstArt
+                }
 
                 var mp3Map: Map<String, DriveFile> = emptyMap()
                 var targetFolderId = mp3FolderId ?: repository.cachedMp3FolderId
@@ -1159,6 +1342,11 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
     private fun handleDataSaverToggleRecovery(dataSaverEnabled: Boolean) {
         viewModelScope.launch(Dispatchers.Main) {
             val player = hostController
+            val activeFile = _activeQueue.value.getOrNull(_currentIndex.value) ?: currentPlayingFile
+            if (activeFile != null) {
+                currentPlayingFile = activeFile
+            }
+
             val hasActiveTrack = player != null && (
                 player.isPlaying ||
                 player.playWhenReady ||
@@ -1167,39 +1355,36 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
                 player.playbackState == Player.STATE_BUFFERING
             )
 
-            if (player == null || !hasActiveTrack) {
+            if (player == null || !hasActiveTrack || activeFile == null) {
                 // If player is not actively playing or paused on a track, safely execute cache sweep
                 executeCacheSweep(dataSaverEnabled)
                 return@launch
             }
 
             // 1. Safe Player Reset:
-            // Capture the current playback position: val currentPos = player.currentPosition
             val currentPos = player.currentPosition.coerceAtLeast(0L)
-            val currentItemIndex = player.currentMediaItemIndex
-            val existingItems = (0 until player.mediaItemCount).map { player.getMediaItemAt(it) }
 
-            // Stop the player to release the file locks: player.stop()
+            // Stop the player to release the file locks
             player.stop()
 
-            // Clear the media items: player.clearMediaItems()
+            // Clear the media items
             player.clearMediaItems()
 
             // 2. Execute Cache Sweep:
-            // Now that ExoPlayer has released the files, safely run the existing Cache Sweeper logic
-            // (deleting MP3s if toggled OFF, deleting FLACs if toggled ON).
             executeCacheSweep(dataSaverEnabled)
 
             // 3. Re-Resolve and Resume:
-            // Trigger the Look-Ahead Queue/URI resolver for the current song based on the new Data Saver state.
-            // Build the new MediaItem (with the correct ?alt=media URI and MIME type).
-            val newMediaItems = resolveMediaItemsForDataSaver(existingItems, dataSaverEnabled)
+            val currentStubItem = MediaItem.Builder()
+                .setMediaId(activeFile.fileId)
+                .setTag(activeFile)
+                .setUri(Uri.parse("https://www.googleapis.com/drive/v3/files/${activeFile.fileId}?alt=media"))
+                .build()
 
-            if (newMediaItems.isNotEmpty()) {
-                val targetIndex = if (currentItemIndex in newMediaItems.indices) currentItemIndex else 0
-                // Add the item to the player, seek to the saved position (player.seekTo(currentPos))
-                player.setMediaItems(newMediaItems, targetIndex, currentPos)
-                player.seekTo(targetIndex, currentPos)
+            val resolvedItems = resolveMediaItemsForDataSaver(listOf(currentStubItem), dataSaverEnabled)
+
+            if (resolvedItems.isNotEmpty()) {
+                player.setMediaItems(resolvedItems, 0, currentPos)
+                player.seekTo(0, currentPos)
             }
 
             // Explicitly call player.prepare() to clear any lingering error states before calling player.play().
@@ -1830,6 +2015,7 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 
                 _activeAccount.value = account
+                _isInitialFolderReady.value = true
                 repository.initializeDriveService(account)
                 resolveMp3FolderIdAsync()
                 fetchCurrentFolder()
@@ -1849,22 +2035,37 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
         val client = GoogleSignIn.getClient(getApplication(), gso)
         client.signOut().addOnCompleteListener {
             _activeAccount.value = null
+            _isInitialFolderReady.value = true
             mp3FolderId = null
             repository.cachedMp3FolderId = null
             _uiState.value = DriveUiState.Idle
+            _currentPlayingFileId.value = null
+            _currentPlayingTrack.value = null
+            _activeTrackDurationMs.value = 0L
+            currentPlayingFile = null
             myDriveStack.clear()
             myDriveStack.add(Pair("root", "My Drive"))
             _currentFolder.value = Pair("root", "My Drive")
             hostController?.stop()
             hostController?.clearMediaItems()
             _player.value = null
+            viewModelScope.launch {
+                folderPageCache.clear()
+            }
         }
     }
 
     fun openFolder(folderId: String, folderName: String) {
+        val cached = folderPageCache.get(folderId)
         myDriveStack.add(Pair(folderId, folderName))
         _currentFolder.value = Pair(folderId, folderName)
-        fetchCurrentFolder()
+        if (cached != null) {
+            applySortToFiles(cached, _sortState.value)
+            fetchCurrentFolder(forceShowLoading = false)
+        } else {
+            _uiState.value = DriveUiState.Loading
+            fetchCurrentFolder(forceShowLoading = true)
+        }
     }
 
     /**
@@ -1873,26 +2074,41 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
     fun navigateBack(): Boolean {
         if (myDriveStack.size > 1) {
             myDriveStack.removeLast()
-            _currentFolder.value = myDriveStack.last()
-            fetchCurrentFolder()
+            val target = myDriveStack.last()
+            val cached = if (target.first == "FAVOURITES") _favourites.value else folderPageCache.get(target.first)
+            _currentFolder.value = target
+            if (cached != null) {
+                applySortToFiles(cached, _sortState.value)
+                if (target.first != "FAVOURITES") {
+                    fetchCurrentFolder(forceShowLoading = false)
+                }
+            } else {
+                _uiState.value = DriveUiState.Loading
+                fetchCurrentFolder(forceShowLoading = true)
+            }
             return true
         }
         return false // Let the system handle Back if we are at root
     }
 
-    private fun fetchCurrentFolder() {
+    private fun fetchCurrentFolder(forceShowLoading: Boolean = false) {
         viewModelScope.launch {
             val currentFolderId = myDriveStack.last().first
             if (currentFolderId == "FAVOURITES") {
                 applySortToFiles(_favourites.value, _sortState.value)
                 return@launch
             }
-            
-            _uiState.value = DriveUiState.Loading
+
+            val cachedExisting = folderPageCache.get(currentFolderId)
+            if (forceShowLoading || cachedExisting == null) {
+                _uiState.value = DriveUiState.Loading
+            } else {
+                _isBackgroundRefreshing.value = true
+            }
+
             try {
                 val rawFiles = repository.getFilesAndFolders(folderId = currentFolderId)
                 val files = rawFiles.filterNot { it.isFolder && it.name.trim().equals("mp3", ignoreCase = true) }
-                applySortToFiles(files, _sortState.value)
 
                 if (currentFolderId == "root" && !hasAutoNavigatedToDefaultFolder) {
                     val defId = _defaultMusicFolderId.value
@@ -1900,10 +2116,22 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
                     if (!defId.isNullOrEmpty() && !defName.isNullOrEmpty()) {
                         hasAutoNavigatedToDefaultFolder = true
                         openFolder(defId, defName)
+                        return@launch
                     }
                 }
+
+                folderPageCache.put(currentFolderId, files)
+                if (cachedExisting == null || cachedExisting != files) {
+                    applySortToFiles(files, _sortState.value)
+                }
             } catch (e: Exception) {
-                _uiState.value = DriveUiState.Error("Failed to fetch files: ${e.toString()}")
+                if (cachedExisting == null) {
+                    _uiState.value = DriveUiState.Error("Failed to fetch files: ${e.toString()}")
+                } else {
+                    android.util.Log.w("DriveViewModel", "Background refresh failed, keeping cached files: ${e.message}")
+                }
+            } finally {
+                _isBackgroundRefreshing.value = false
             }
         }
     }
@@ -1948,6 +2176,35 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
         loadThumbnailsForFiles(sortedSongs)
     }
 
+    fun updateActiveMediaItemPoster(fileId: String, posterUrl: String) {
+        if (_currentPlayingFileId.value == fileId) {
+            _currentSpotifyArtUrl.value = posterUrl
+            val player = hostController ?: return
+            val currIdx = player.currentMediaItemIndex
+            if (currIdx != androidx.media3.common.C.INDEX_UNSET && currIdx in 0 until player.mediaItemCount) {
+                val currentItem = player.getMediaItemAt(currIdx)
+                if (currentItem.mediaId == fileId) {
+                    val currentArt = currentItem.mediaMetadata.artworkUri?.toString()
+                    if (currentArt != posterUrl) {
+                        val updatedMetadata = currentItem.mediaMetadata.buildUpon()
+                            .setArtworkUri(Uri.parse(posterUrl))
+                            .build()
+                        val updatedItem = currentItem.buildUpon()
+                            .setMediaMetadata(updatedMetadata)
+                            .build()
+                        viewModelScope.launch(Dispatchers.Main) {
+                            try {
+                                player.replaceMediaItem(currIdx, updatedItem)
+                            } catch (e: Exception) {
+                                android.util.Log.w("DriveViewModel", "replaceMediaItem failed: ${e.message}")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /**
      * Loads album art / thumbnails for a list of audio files asynchronously.
      * Synchronously resolves any already-cached thumbnails, then queries
@@ -1971,6 +2228,7 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
         }
         if (cachedMap.isNotEmpty()) {
             _songThumbnails.update { it + cachedMap }
+            cachedMap.forEach { (id, url) -> updateActiveMediaItemPoster(id, url) }
         }
 
         ThumbnailDiagnosticManager.log("DriveViewModel", "${cachedMap.size} cached, ${toFetch.size} to fetch online")
@@ -1985,6 +2243,9 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
                     val url = SpotifyAuthManager.getAlbumArtUrl(file.name)
                     if (!url.isNullOrEmpty()) {
                         _songThumbnails.update { it + (file.fileId to url) }
+                        withContext(Dispatchers.Main) {
+                            updateActiveMediaItemPoster(file.fileId, url)
+                        }
                         ThumbnailDiagnosticManager.log("DriveViewModel", "Loaded: ${file.name} -> $url")
                     } else {
                         ThumbnailDiagnosticManager.log("DriveViewModel", "No art found: ${file.name}")
@@ -2007,6 +2268,9 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
                     val url = SpotifyAuthManager.getAlbumArtUrl(file.name)
                     if (!url.isNullOrEmpty()) {
                         _songThumbnails.update { it + (file.fileId to url) }
+                        withContext(Dispatchers.Main) {
+                            updateActiveMediaItemPoster(file.fileId, url)
+                        }
                     }
                 } catch (e: Exception) {
                     ThumbnailDiagnosticManager.log("DriveViewModel", "Retry error for ${file.name}: ${e.message}")
@@ -2105,27 +2369,58 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
 
     private suspend fun restorePlaybackState() {
         if (hasRestoredPlayback) return
+        val existingPlayer = hostController
+        if (existingPlayer != null && (
+                existingPlayer.currentMediaItem != null ||
+                existingPlayer.isPlaying ||
+                existingPlayer.playWhenReady ||
+                existingPlayer.playbackState == Player.STATE_BUFFERING
+            )
+        ) {
+            hasRestoredPlayback = true
+            if (existingPlayer.duration > 0L) {
+                _activeTrackDurationMs.value = existingPlayer.duration
+            }
+            return
+        }
         
         val queue = themeRepository.playbackQueueFlow.firstOrNull() ?: emptyList()
         if (queue.isEmpty()) return
         
         val trackId = themeRepository.currentTrackIdFlow.firstOrNull()
         val position = themeRepository.currentPositionFlow.firstOrNull() ?: 0L
+        val savedDuration = themeRepository.currentDurationFlow.firstOrNull() ?: 0L
         
         _originalPlaylist.value = queue
         _activeQueue.value = queue
         activeSourceFolderId = null
-        _currentIndex.value = if (trackId != null) queue.indexOfFirst { it.fileId == trackId }.coerceAtLeast(0) else 0
+        val startIndex = if (trackId != null) queue.indexOfFirst { it.fileId == trackId }.coerceAtLeast(0) else 0
+        _currentIndex.value = startIndex
         _currentPlayingFileId.value = trackId
+        _currentPlayingTrack.value = queue.getOrNull(startIndex)
         activeAudioPlaylist = queue
+
+        val fallbackDuration = if (savedDuration > 0L) savedDuration else (queue.getOrNull(startIndex)?.durationMs ?: 0L)
+        _activeTrackDurationMs.value = fallbackDuration
         
         val token = repository.getBearerToken() ?: return
         PlaybackService.updateActiveToken(token)
         
         val mediaItems = queue.map { file ->
             activeMediaMap[file.fileId] = file
+            val artUrl = file.thumbnailUrl
+                ?: _songThumbnails.value[file.fileId]
+                ?: SpotifyAuthManager.getCachedArtUrl(file.name)
             val uri = Uri.parse("https://www.googleapis.com/drive/v3/files/${file.fileId}?alt=media")
-            val mediaMetadata = MediaMetadata.Builder().setTitle(file.name).build()
+            val mediaMetadata = MediaMetadata.Builder()
+                .setTitle(file.name)
+                .setArtist("DriveStream")
+                .apply {
+                    if (!artUrl.isNullOrEmpty()) {
+                        setArtworkUri(Uri.parse(artUrl))
+                    }
+                }
+                .build()
             val requestMetadata = MediaItem.RequestMetadata.Builder()
                 .setExtras(Bundle().apply { 
                     putString("auth_token", token)
@@ -2135,7 +2430,12 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
                 .setMediaMetadata(mediaMetadata).setRequestMetadata(requestMetadata).setTag(file).build()
         }
         
-        val startIndex = mediaItems.indexOfFirst { it.mediaId == trackId }.coerceAtLeast(0)
+        val initialArt = queue.getOrNull(startIndex)?.let { f ->
+            f.thumbnailUrl ?: _songThumbnails.value[f.fileId] ?: SpotifyAuthManager.getCachedArtUrl(f.name)
+        }
+        if (!initialArt.isNullOrEmpty()) {
+            _currentSpotifyArtUrl.value = initialArt
+        }
         
         withContext(Dispatchers.Main) {
             val player = hostController ?: return@withContext
@@ -2176,7 +2476,8 @@ class DriveViewModel(application: Application) : AndroidViewModel(application) {
                 val currentTrackId = player.currentMediaItem?.mediaId
                 val position = player.currentPosition
                 val folderName = _currentPlayingFolderName.value
-                themeRepository.savePlaybackState(fullQueue, currentTrackId, position, folderName)
+                val validDuration = if (player.duration > 0L) player.duration else _activeTrackDurationMs.value
+                themeRepository.savePlaybackState(fullQueue, currentTrackId, position, folderName, validDuration)
             }
         }
     }

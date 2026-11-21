@@ -1,5 +1,8 @@
 package com.example.drivestream
 
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -44,7 +47,7 @@ import androidx.media3.common.Player
 private val SpotifyDarkBackground = Color(0xFF121212)
 private val SpotifySecondaryText = Color(0xFFB3B3B3)
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun SpotifyFolderView(
     folderId: String,
@@ -378,7 +381,10 @@ fun SpotifyFolderView(
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             // Shuffle Toggle Button
-                            IconButton(onClick = onToggleShuffle) {
+                            IconButton(
+                                onClick = onToggleShuffle,
+                                modifier = Modifier.bounceClick(scaleDown = 0.92f, onClick = onToggleShuffle)
+                            ) {
                                 Icon(
                                     imageVector = Icons.Rounded.Shuffle,
                                     contentDescription = "Shuffle",
@@ -404,17 +410,17 @@ fun SpotifyFolderView(
                                     .shadow(8.dp, CircleShape)
                                     .clip(CircleShape)
                                     .background(primaryColor)
-                                    .clickable {
+                                    .bounceClick(scaleDown = 0.92f) {
                                         // 3. Debounce the Input: ignore subsequent clicks within 300ms
                                         val now = android.os.SystemClock.elapsedRealtime()
                                         if (now - lastPlayButtonClickTime < 300L) {
-                                            return@clickable
+                                            return@bounceClick
                                         }
                                         lastPlayButtonClickTime = now
 
                                         if (player == null) {
                                             loadPlaylistAndPlay()
-                                            return@clickable
+                                            return@bounceClick
                                         }
 
                                         // 1. Refactor Click Listener: Read exact state directly from the player
@@ -435,13 +441,13 @@ fun SpotifyFolderView(
                                         // 2. Implement Strict Execution Branches:
                                         if (queueContainsThisPlaylist && isPlayerActive) {
                                             if (isCurrentlyPlaying) {
-                                                // Branch A (Pause): If isCurrentlyPlaying is true, strictly execute player.pause() and return@onClick.
+                                                // Branch A (Pause): If isCurrentlyPlaying is true, strictly execute player.pause() and return@bounceClick.
                                                 player.pause()
-                                                return@clickable
+                                                return@bounceClick
                                             } else {
-                                                // Branch B (Resume): If isCurrentlyPlaying is false AND the current ExoPlayer queue already contains this playlist's media items, strictly execute player.play() and return@onClick.
+                                                // Branch B (Resume): If isCurrentlyPlaying is false AND the current ExoPlayer queue already contains this playlist's media items, strictly execute player.play() and return@bounceClick.
                                                 player.play()
-                                                return@clickable
+                                                return@bounceClick
                                             }
                                         } else {
                                             // Branch C (Start Fresh): Only if the player is idle, stopped, or playing a completely different playlist, execute the heavy loadPlaylistAndPlay() sequence.
@@ -450,8 +456,8 @@ fun SpotifyFolderView(
                                     },
                                 contentAlignment = Alignment.Center
                             ) {
-                                Icon(
-                                    imageVector = if (isPlayingThisFolder && isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                AnimatedPlayPauseIcon(
+                                    isPlaying = isPlayingThisFolder && isPlaying,
                                     contentDescription = if (isPlayingThisFolder && isPlaying) "Pause" else "Play",
                                     tint = onPrimaryColor,
                                     modifier = Modifier.size(32.dp)
@@ -466,7 +472,8 @@ fun SpotifyFolderView(
                     items(subfolders, key = { it.fileId }) { subfolder ->
                         SpotifySubfolderRow(
                             folder = subfolder,
-                            onClick = { onFolderClick(subfolder.fileId, subfolder.name) }
+                            onClick = { onFolderClick(subfolder.fileId, subfolder.name) },
+                            modifier = Modifier.animateItemPlacement(tween(240, easing = FastOutSlowInEasing))
                         )
                     }
                 }
@@ -509,7 +516,8 @@ fun SpotifyFolderView(
                             onAddToQueue = { onAddToQueue(song) },
                             onDownload = { onDownload(song) },
                             onShare = { onShareTrack(song) },
-                            musicNotePainter = musicNotePainter
+                            musicNotePainter = musicNotePainter,
+                            modifier = Modifier.animateItemPlacement(tween(240, easing = FastOutSlowInEasing))
                         )
                     }
                 }
@@ -686,7 +694,8 @@ private fun SpotifySongItem(
     onAddToQueue: () -> Unit,
     onDownload: () -> Unit,
     onShare: () -> Unit,
-    musicNotePainter: androidx.compose.ui.graphics.painter.Painter? = null
+    musicNotePainter: androidx.compose.ui.graphics.painter.Painter? = null,
+    modifier: Modifier = Modifier
 ) {
     val primaryColor = MaterialTheme.colorScheme.primary
     var expandedMenu by remember { mutableStateOf(false) }
@@ -711,9 +720,9 @@ private fun SpotifySongItem(
     val placeholderPainter = musicNotePainter ?: androidx.compose.ui.graphics.vector.rememberVectorPainter(Icons.Default.MusicNote)
 
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .bounceClick(scaleDown = 0.98f, onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(14.dp)
@@ -776,59 +785,68 @@ private fun SpotifySongItem(
             )
         }
 
-        // Right: Three dots vertical menu
-        Box {
-            IconButton(onClick = { expandedMenu = true }) {
-                Icon(
-                    imageVector = Icons.Default.MoreVert,
-                    contentDescription = "Options",
-                    tint = SpotifySecondaryText
-                )
-            }
-            if (expandedMenu) {
-                DropdownMenu(
-                    expanded = true,
-                    onDismissRequest = { expandedMenu = false }
-                ) {
-                    DropdownMenuItem(
-                        text = { Text(if (isFavourite) "Remove from Favourites" else "Add to Favourites") },
-                        leadingIcon = {
-                            Icon(
-                                imageVector = if (isFavourite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
-                                contentDescription = null,
-                                tint = if (isFavourite) Color.Red else Color.Unspecified,
-                                modifier = Modifier.size(20.dp)
-                            )
-                        },
-                        onClick = {
-                            expandedMenu = false
-                            onToggleFavourite()
-                        }
+        // Right: Favourite Heart Button + Three dots vertical menu
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            AnimatedFavoriteButton(
+                isFavourite = isFavourite,
+                onToggle = onToggleFavourite,
+                iconSize = 22.dp,
+                activeColor = Color.Red,
+                inactiveColor = SpotifySecondaryText
+            )
+            Box {
+                IconButton(onClick = { expandedMenu = true }) {
+                    Icon(
+                        imageVector = Icons.Default.MoreVert,
+                        contentDescription = "Options",
+                        tint = SpotifySecondaryText
                     )
-                    DropdownMenuItem(
-                        text = { Text("Add to Queue") },
-                        leadingIcon = { Icon(Icons.Default.QueueMusic, null, modifier = Modifier.size(20.dp)) },
-                        onClick = {
-                            expandedMenu = false
-                            onAddToQueue()
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Download Track") },
-                        leadingIcon = { Icon(Icons.Default.Download, null, modifier = Modifier.size(20.dp)) },
-                        onClick = {
-                            expandedMenu = false
-                            onDownload()
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Share Track") },
-                        leadingIcon = { Icon(Icons.Default.Share, null, modifier = Modifier.size(20.dp)) },
-                        onClick = {
-                            expandedMenu = false
-                            onShare()
-                        }
-                    )
+                }
+                if (expandedMenu) {
+                    DropdownMenu(
+                        expanded = true,
+                        onDismissRequest = { expandedMenu = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text(if (isFavourite) "Remove from Favourites" else "Add to Favourites") },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = if (isFavourite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                                    contentDescription = null,
+                                    tint = if (isFavourite) Color.Red else Color.Unspecified,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            },
+                            onClick = {
+                                expandedMenu = false
+                                onToggleFavourite()
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Add to Queue") },
+                            leadingIcon = { Icon(Icons.Default.QueueMusic, null, modifier = Modifier.size(20.dp)) },
+                            onClick = {
+                                expandedMenu = false
+                                onAddToQueue()
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Download Track") },
+                            leadingIcon = { Icon(Icons.Default.Download, null, modifier = Modifier.size(20.dp)) },
+                            onClick = {
+                                expandedMenu = false
+                                onDownload()
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Share Track") },
+                            leadingIcon = { Icon(Icons.Default.Share, null, modifier = Modifier.size(20.dp)) },
+                            onClick = {
+                                expandedMenu = false
+                                onShare()
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -841,13 +859,14 @@ private fun SpotifySongItem(
 @Composable
 private fun SpotifySubfolderRow(
     folder: DriveFile,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     val primaryColor = MaterialTheme.colorScheme.primary
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .bounceClick(scaleDown = 0.98f, onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {

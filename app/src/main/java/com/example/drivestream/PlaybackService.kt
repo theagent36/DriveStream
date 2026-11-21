@@ -1,5 +1,6 @@
 package com.example.drivestream
 
+import android.app.PendingIntent
 import android.content.Intent
 import android.net.Uri
 import android.os.Handler
@@ -184,6 +185,7 @@ class PlaybackService : MediaSessionService() {
         player = ExoPlayer.Builder(this)
             .setMediaSourceFactory(DefaultMediaSourceFactory(cacheDataSourceFactory).setLoadErrorHandlingPolicy(InfiniteRetryLoadErrorHandlingPolicy()))
             .setLoadControl(loadControl)
+            .setWakeMode(C.WAKE_MODE_NETWORK)
             .setAudioAttributes(AudioAttributes.Builder()
                 .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
                 .setUsage(C.USAGE_MEDIA)
@@ -204,9 +206,9 @@ class PlaybackService : MediaSessionService() {
             private fun updateLocks() {
                 val state = player?.playbackState ?: Player.STATE_IDLE
                 val playing = player?.playWhenReady ?: false
-                val isActivelyDownloading = state == Player.STATE_BUFFERING || (playing && state == Player.STATE_READY)
-                if (isActivelyDownloading) {
-                    wakeLock?.acquire(10 * 60 * 1000L) // 10 min timeout just in case
+                val shouldHoldLocks = playing || state == Player.STATE_BUFFERING
+                if (shouldHoldLocks) {
+                    wakeLock?.acquire(10 * 60 * 1000L)
                     wifiLock?.acquire()
                 } else {
                     if (wakeLock?.isHeld == true) wakeLock?.release()
@@ -214,10 +216,31 @@ class PlaybackService : MediaSessionService() {
                 }
             }
 
+            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                updateLocks()
+            }
+
             override fun onPlaybackStateChanged(playbackState: Int) {
                 updateLocks()
-                if (playbackState == Player.STATE_READY && player?.playWhenReady == true) {
+                val activePlayer = player ?: return
+                if (playbackState == Player.STATE_READY && activePlayer.playWhenReady) {
                     try { equalizer?.enabled = isEqEnabled } catch (e: Exception) {}
+                    if (!activePlayer.isPlaying &&
+                        activePlayer.playbackSuppressionReason == Player.PLAYBACK_SUPPRESSION_REASON_NONE
+                    ) {
+                        activePlayer.play()
+                    }
+                }
+            }
+
+            override fun onPlaybackSuppressionReasonChanged(playbackSuppressionReason: Int) {
+                val activePlayer = player ?: return
+                if (playbackSuppressionReason == Player.PLAYBACK_SUPPRESSION_REASON_NONE &&
+                    activePlayer.playWhenReady &&
+                    activePlayer.playbackState == Player.STATE_READY &&
+                    !activePlayer.isPlaying
+                ) {
+                    activePlayer.play()
                 }
             }
 
@@ -253,8 +276,18 @@ class PlaybackService : MediaSessionService() {
         }
         registerReceiver(bluetoothReceiver, filter)
 
+        val sessionActivityPendingIntent = PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            },
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
         // Create the MediaSession
         mediaSession = MediaSession.Builder(this, player!!)
+            .setSessionActivity(sessionActivityPendingIntent)
             .setCallback(object : MediaSession.Callback {
                 override fun onAddMediaItems(
                     mediaSession: MediaSession,
@@ -331,6 +364,11 @@ class PlaybackService : MediaSessionService() {
         serviceScope.cancel()
         DriveStreamCache.release()
         super.onDestroy()
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        super.onStartCommand(intent, flags, startId)
+        return START_STICKY
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
